@@ -450,10 +450,6 @@ def _final_result_for_output(x: Any) -> Any:
     # 单元素标量数组：解包为标量（用户期望一个值不要用列表包裹）
     if isinstance(x, list) and len(x) == 1 and not isinstance(x[0], (dict, list, tuple)):
         return x[0]
-    if isinstance(x, list) and len(x) > 1:
-        # 仅对“看起来像多条记录”的列表做收敛：元素全为 dict 时取最后一条
-        if all(isinstance(it, dict) for it in x):
-            return x[-1]
     return x
 
 

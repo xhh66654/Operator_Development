@@ -82,6 +82,7 @@ from refactored.core.exceptions import ErrorCode  # noqa: E402
 from refactored.core.run_lifecycle import normalize_run_id, release_run, try_acquire_run  # noqa: E402
 from refactored.integration.async_jobs import job_submit  # noqa: E402
 from refactored.pipeline.tree_calculation import response_meta_triple  # noqa: E402
+from refactored import app_config  # noqa: E402
 
 app = Flask(__name__)
 CORS(app)
@@ -245,9 +246,7 @@ def calculate():
             req_data.get("taskId"),
             run_id,
         )
-        _cb_url = os.environ.get("RESULT_CALLBACK_URL", "").strip() or (
-            "http://127.0.0.1:8091/api/callback/result"
-        )
+        _cb_url = os.environ.get("RESULT_CALLBACK_URL", "").strip() or app_config.RESULT_CALLBACK_URL_DEFAULT
         _stderr_line(
             f"[refactored.service] 已入队异步任务 job={internal_job_id}；"
             f"算完后将 POST 结果到 {_cb_url}（须另有进程监听，例如 PythonResultReceiver）"
@@ -329,9 +328,7 @@ def _log_startup_banner(host: str, port: int, callback_default: str) -> None:
 
 if __name__ == "__main__":
     _host, _port = _listen_host(), _listen_port()
-    _cb = os.environ.get("RESULT_CALLBACK_URL", "").strip() or (
-        "http://127.0.0.1:8091/api/callback/result"
-    )
+    _cb = os.environ.get("RESULT_CALLBACK_URL", "").strip() or app_config.RESULT_CALLBACK_URL_DEFAULT
     _ensure_runtime_logging_visible()
     _log_startup_banner(_host, _port, _cb)
     app.run(

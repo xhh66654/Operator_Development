@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from refactored.core.exceptions import ErrorCode
 from refactored.core.run_lifecycle import normalize_run_id, release_run
 from refactored.pipeline.tree_calculation import response_meta_triple
+from refactored import app_config
 
 from .callback_client import post_json
 
@@ -21,8 +22,7 @@ logger = logging.getLogger(__name__)
 def _stderr_line(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
-DEFAULT_RESULT_CALLBACK_URL = "http://127.0.0.1:8091/api/callback/result"
-#10.60.184.245:8091
+DEFAULT_RESULT_CALLBACK_URL = app_config.RESULT_CALLBACK_URL_DEFAULT
 
 _executor: Optional[ThreadPoolExecutor] = None
 _jobs_lock = Lock()
