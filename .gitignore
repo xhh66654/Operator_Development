@@ -1,4 +1,18 @@
+# --- 现有的 Python 忽略规则 ---
 __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+
+# --- 新增：必须忽略的大文件夹 ---
+java-test/
+docs/
+jdk-11.0.30.7-hotspot/
+demo_frontend/
+.venv/
+.venv1/
+.idea/
+new_data_calculation/
+python_callback_results/
+sample_data/
+scripts/
