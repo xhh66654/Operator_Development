@@ -317,6 +317,35 @@ def _pythonize(dv: Any) -> Any:
     return dv
 
 
+def _last_chain_step_value_from_ctx(chain_steps: List[Any], ctx: ExecutionContext) -> Any:
+    """
+    顺序链已在 exec_metric_subtree / run_operator_chain 中执行完毕后，
+    仅根据 ctx 读取链尾一步的 python 结果（与 run_operator_chain 写入顺序一致）。
+    """
+    last_py: Any = None
+    for raw in chain_steps or []:
+        item = normalize_tree_node(raw)
+        if not isinstance(item, dict):
+            continue
+        if item.get("steps") and not str(item.get("operator_key") or "").strip():
+            last_py = _last_chain_step_value_from_ctx(item["steps"], ctx)
+            raw_key = item.get("id") or item.get("node_id") or item.get("step_key")
+            step_key = str(raw_key).strip() if raw_key is not None else ""
+            if step_key:
+                v = ctx.get(step_key)
+                if v is not None:
+                    last_py = v
+            continue
+        op_key = item.get("operator_key") or item.get("operator")
+        if not op_key:
+            continue
+        raw_key = item.get("id") or item.get("node_id") or item.get("step_key")
+        step_key = str(raw_key).strip() if raw_key is not None else ""
+        if step_key:
+            last_py = ctx.get(step_key)
+    return last_py
+
+
 def run_operator_chain(chain_steps: List[Any], ctx: ExecutionContext) -> Any:
     """执行叶子内算子链，自上而下；每步可用 node_id 写入上下文供后续引用。"""
     last_dv: Any = None
@@ -326,6 +355,10 @@ def run_operator_chain(chain_steps: List[Any], ctx: ExecutionContext) -> Any:
             continue
         if item.get("steps") and not str(item.get("operator_key") or "").strip():
             last_dv = run_operator_chain(item["steps"], ctx)
+            raw_key = item.get("id") or item.get("node_id") or item.get("step_key")
+            step_key = str(raw_key).strip() if raw_key is not None else ""
+            if step_key:
+                ctx.set(step_key, _pythonize(last_dv))
             continue
         op_key = item.get("operator_key") or item.get("operator")
         if not op_key:
@@ -335,6 +368,7 @@ def run_operator_chain(chain_steps: List[Any], ctx: ExecutionContext) -> Any:
         step_key = str(raw_key).strip() if raw_key is not None else ""
         cfg = resolve_config_refs(copy.deepcopy(item.get("config") or {}), ctx)
         op = OperatorRegistry.get(op_name)
+        print(op_name,raw_key,step_key,cfg,op)
         t0 = time.perf_counter()
         try:
             last_dv = op.run({}, cfg, ctx)
@@ -391,6 +425,14 @@ def exec_metric_subtree(node: Any, ctx: ExecutionContext) -> None:
             )
         val = _pythonize(dv)
         _store_node_outputs(ctx, node, val)
+    else:
+        raw_key = node.get("id") or node.get("node_id") or node.get("step_key")
+        step_key = str(raw_key).strip() if raw_key is not None else ""
+        sub = node.get("steps")
+        if step_key and isinstance(sub, list) and len(sub) > 0:
+            final_v = _last_chain_step_value_from_ctx(sub, ctx)
+            if final_v is not None:
+                ctx.set(step_key, final_v)
 
 
 def _lookup_node_result(node: Dict[str, Any], ctx: ExecutionContext) -> Any:
@@ -491,6 +533,59 @@ def _id_for_output(raw_id: Any, path: str) -> Any:
     return raw_id
 
 
+def _should_attempt_build_child(node: Any, ctx: ExecutionContext) -> bool:
+    """
+    子节点是否值得构建回包片段（用于减少无意义的递归与噪声）：
+    - 显式声明了 result（哪怕是 {} 占位）=> 需要回包
+    - 有子 steps => 需要下钻
+    - 执行阶段已写入上下文 computed != None => 需要回包
+
+    注意：此处的“空值”指 computed 为 None 且未显式声明 result 且无子 steps。
+    """
+    node = normalize_tree_node(node)
+    if not isinstance(node, dict):
+        return False
+    has_result_key = "result" in node
+    sub = node.get("steps")
+    has_child_steps = isinstance(sub, list) and len(sub) > 0
+    has_computed = _lookup_node_result(node, ctx) is not None
+    return bool(has_result_key or has_child_steps or has_computed)
+
+
+def _node_id_for_result(orig_node: Dict[str, Any], path: str) -> Any:
+    """回包 id：node_id 优先，其次 id，再次 indicatorId；缺失则 auto_{path}。"""
+    raw_id = orig_node.get("node_id")
+    if raw_id is None or str(raw_id).strip() == "":
+        raw_id = orig_node.get("id")
+    if raw_id is None or str(raw_id).strip() == "":
+        raw_id = orig_node.get("indicatorId")
+    return _id_for_output(raw_id, path)
+
+
+def _compute_value_for_result(
+    orig_node: Dict[str, Any],
+    *,
+    ctx: ExecutionContext,
+    child_frags: List[Dict[str, Any]],
+) -> Any:
+    """
+    计算回包 result 值（不做 jsonable/finalize）。
+    规则保持不变：
+    - computed 优先来自上下文；
+    - 容器节点若 wants_result 且 computed 为空，用最后一个子节点 result 兜底；
+    - 容器节点 wants_result 时，对单元素标量列表做解包（用于 steps 扁平化场景）。
+    """
+    computed = _lookup_node_result(orig_node, ctx)
+    wants_result = "result" in orig_node
+    op_raw = orig_node.get("operator_key") or orig_node.get("operator")
+    is_container = not str(op_raw or "").strip()
+    if computed is None and wants_result and child_frags:
+        computed = child_frags[-1].get("result")
+    if is_container and wants_result:
+        computed = _unwrap_single_scalar_list(computed)
+    return computed
+
+
 def build_result_tree(orig_node: Any, ctx: ExecutionContext, path: str = "0") -> Optional[Dict[str, Any]]:
     """
     生成用于回传的结果树片段：
@@ -504,15 +599,7 @@ def build_result_tree(orig_node: Any, ctx: ExecutionContext, path: str = "0") ->
 
     child_frags: List[Dict[str, Any]] = []
     for idx, ch in enumerate(orig_node.get("steps") or []):
-        if not isinstance(ch, dict):
-            continue
-        # 兼容“最底层算子节点未显式带 result:{}”的情况：
-        # 即使输入没声明 result，只要该节点执行阶段写入了上下文（computed != None），也应纳入回包树。
-        has_result_key = "result" in ch
-        sub = ch.get("steps")
-        has_child_steps = isinstance(sub, list) and len(sub) > 0
-        has_computed = _lookup_node_result(ch, ctx) is not None
-        if not has_result_key and not has_child_steps and not has_computed:
+        if not _should_attempt_build_child(ch, ctx):
             continue
         cf = build_result_tree(ch, ctx, f"{path}.{idx}")
         if cf:
@@ -520,32 +607,18 @@ def build_result_tree(orig_node: Any, ctx: ExecutionContext, path: str = "0") ->
 
     child_frags = _collapse_sequential_step_results(child_frags)
 
-    raw_id = orig_node.get("node_id")
-    if raw_id is None or str(raw_id).strip() == "":
-        raw_id = orig_node.get("id")
-    if raw_id is None or str(raw_id).strip() == "":
-        raw_id = orig_node.get("indicatorId")
-    node_id_out = _id_for_output(raw_id, path)
-
-    computed = _lookup_node_result(orig_node, ctx)
+    node_id_out = _node_id_for_result(orig_node, path)
+    computed = _compute_value_for_result(orig_node, ctx=ctx, child_frags=child_frags)
     wants_result = "result" in orig_node
-    op_raw = orig_node.get("operator_key") or orig_node.get("operator")
-    is_container = not str(op_raw or "").strip()
-    # 容器节点（无 operator_key 但有 steps）常见写法：自身声明 result，但实际结果来自最后一步子节点。
-    # 执行阶段不会为容器节点写入上下文，因此 computed 为空；这里将折叠后的最后子节点 result 作为兜底回传。
-    if computed is None and wants_result and child_frags:
-        computed = child_frags[-1].get("result")
-    # 容器节点的最终结果若是单元素标量数组，回包时解包为标量
-    if is_container and wants_result:
-        computed = _unwrap_single_scalar_list(computed)
     has_computed = computed is not None
     should_include_result = wants_result or has_computed
+    op_raw = orig_node.get("operator_key") or orig_node.get("operator")
+    is_container = not str(op_raw or "").strip()
 
     if not child_frags and not should_include_result:
         return None
 
     frag: Dict[str, Any] = {"id": node_id_out}
-    # 仅当输入声明了 result 或上下文能解析到值时输出 result，避免空壳节点带 null
     if should_include_result:
         frag["result"] = _final_result_for_output(_jsonable(computed))
     if orig_node.get("node_id") is not None:

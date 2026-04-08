@@ -1,4 +1,5 @@
 """算子基类：统一异常处理、上下文、配置校验"""
+import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
@@ -6,6 +7,17 @@ from .context import ExecutionContext
 from .exceptions import ErrorCode, OperatorException
 from .config_schema import validate_operator_config
 from .data_model import DataValue
+
+_DEBUG_STEP_CTX_KEY = "_debug_step_id"
+
+
+def operator_console_debug_enabled() -> bool:
+    """
+    为 True 时，每次算子 run() 成功后在控制台打印算子名与 python 结果。
+    环境变量（任一为 1/true/on）：CALC_DEBUG_OPERATOR_RESULT、CALC_DEBUG_STEP_RESULT。
+    """
+    v = os.environ.get("CALC_DEBUG_OPERATOR_RESULT", os.environ.get("CALC_DEBUG_STEP_RESULT", "")).strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 def _build_seq_value_keys(max_items: int = 50) -> list[str]:

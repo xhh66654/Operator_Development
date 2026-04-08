@@ -155,11 +155,24 @@ def _resolve_first_second_values_weights(merged: Dict[str, Any]) -> Dict[str, An
     顺序参数：first_value=观测值，second_value=权重。
     若不处理，_collect_values 会把 first/second 都当样本拼接；weights 为空时 _weights_flat 会退化为全 1；非空权重须与样本等长。
     若已配置非空 weights，仍强制 fields=[first_value]，避免 second_value 被当第二路数据。
+    当 first 缺失而 second 仍在时：必须把 second 挪入 weights 并清空 second_value，否则 _collect_values
+    的 seq_fields 回退会把 second 当成「第二路样本」（例如误把 [1.0] 权重当观测值）。
     """
     fv = merged.get("first_value")
     sv = merged.get("second_value")
-    if fv in (None, "") or sv in (None, ""):
+    if fv in (None, "") and sv in (None, ""):
         return merged
+
+    if fv in (None, ""):
+        out = dict(merged)
+        if sv not in (None, "") and not out.get("weights"):
+            out["weights"] = sv
+        out["second_value"] = None
+        return out
+
+    if sv in (None, ""):
+        return merged
+
     out = dict(merged)
     out["fields"] = [fv]
     if not out.get("weights"):
@@ -421,7 +434,13 @@ class WeightedAverageOperator(BaseOperator):
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
         if not values:
-            return 0.0
+            raise OperatorException(
+                "weighted_average 未取到任何观测值：first_value/fields 解析后为空，"
+                "请检查 ${step} 是否在上下文存在、容器/叶子 id 是否已写入，或上游是否为空列。",
+                code=ErrorCode.DATA_NOT_FOUND,
+                operator=self.name,
+                config=config,
+            )
         weights = _weights_flat(data, config.get("weights"), context, len(values), operator=self.name, config=config)
         total_w = sum(weights)
         if total_w == 0:

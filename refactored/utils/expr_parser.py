@@ -26,7 +26,6 @@ def _safe_eval_node(node: ast.AST) -> float:
         return _safe_eval_node(node.body)
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return float(node.value)
-    # Python 3.7 兼容
     if isinstance(node, ast.Num):
         return float(node.n)
     if isinstance(node, ast.BinOp):

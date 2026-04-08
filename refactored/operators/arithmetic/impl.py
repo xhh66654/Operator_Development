@@ -72,6 +72,24 @@ def _get_seq_refs(config: Dict[str, Any]) -> List[Any]:
     return [config[k] for k in _SEQ_VALUE_KEYS if config.get(k) not in (None, "")]
 
 
+def _reject_seq_operand_hole(config: Dict[str, Any], *, operator: str) -> None:
+    """
+    顺序参数须从 first_value 起连续有效：若 first 为空/未解析而后项仍有值，
+    _get_seq_refs 会跳过 first，导致只剩字面量操作数（如仅 second_value=2 → 结果恒为 2）。
+    """
+    if config.get("first_value") not in (None, ""):
+        return
+    later = [k for k in _SEQ_VALUE_KEYS[1:] if config.get(k) not in (None, "")]
+    if later:
+        raise OperatorException(
+            f"{operator} 的 first_value 为空或未解析（常见于 ${{step}} 在上下文中不存在或字段未命中），"
+            f"但配置了 {', '.join(later)}；请修复上游步骤 id、ES 字段或 reasoningId/sRID 过滤后再算。",
+            code=ErrorCode.DATA_NOT_FOUND,
+            operator=operator,
+            config=config,
+        )
+
+
 def _missing_seq_refs_hint(config: Dict[str, Any]) -> str:
     """
     _get_seq_refs 为空时的补充说明：多见于推理树里 ${step}.列名 解析成 None
@@ -314,6 +332,7 @@ class AddOperator(BaseOperator):
     output_spec = None
 
     def execute(self, data, config, context: ExecutionContext):
+        _reject_seq_operand_hole(config, operator=self.name)
         refs = _get_seq_refs(config)
         if not refs:
             raise OperatorException(
@@ -542,6 +561,7 @@ class MultiplyOperator(BaseOperator):
     output_spec = None
 
     def execute(self, data, config, context: ExecutionContext):
+        _reject_seq_operand_hole(config, operator=self.name)
         refs = _get_seq_refs(config)
         if not refs:
             raise OperatorException(

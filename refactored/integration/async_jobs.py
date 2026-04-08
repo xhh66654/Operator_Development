@@ -88,6 +88,7 @@ def _run_job(job_id: str, body: Dict[str, Any]) -> None:
             f"（完成后回调 {result_url}）"
         )
         result = calculate_indicator(body)
+        print(result)
         ok = bool(result.get("success", True))
         tid, rid, sid = response_meta_triple(body)
         callback_payload: Dict[str, Any] = {

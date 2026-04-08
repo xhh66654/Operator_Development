@@ -22,6 +22,108 @@ def _normalize_table_fields(table: Any) -> Optional[List[str]]:
     return None
 
 
+def _finalize_rows(rows: List[Dict[str, Any]], context: ExecutionContext) -> List[Dict[str, Any]]:
+    """
+    统一将 ES rows（Record[]）转换为列包，并写入上下文缓存。
+    注意：保持既有行为——本函数不做静默过滤/截断。
+    """
+    column_bundle = rows_to_field_list_dict(rows)
+    context.set(ES_EXTRACT_CACHE_CONTEXT_KEY, column_bundle)
+    context.set(context.LATEST_COLUMNS_KEY, column_bundle[0] if column_bundle else {})
+    return column_bundle
+
+
+def _build_search_kwargs(
+    *,
+    index: str,
+    query: Dict[str, Any],
+    source_fields: Optional[List[str]],
+    size: Optional[int] = None,
+    scroll: Optional[str] = None,
+) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {"index": index, "query": query}
+    if size is not None:
+        kwargs["size"] = int(size)
+    if scroll is not None:
+        kwargs["scroll"] = scroll
+    if source_fields is not None:
+        kwargs["_source"] = source_fields
+    return kwargs
+
+
+def _fetch_rows_by_size(
+    client: Any,
+    *,
+    index: str,
+    query: Dict[str, Any],
+    size: int,
+    source_fields: Optional[List[str]],
+) -> List[Dict[str, Any]]:
+    resp = client.search(**_build_search_kwargs(index=index, query=query, size=int(size), source_fields=source_fields))
+    hits = (resp.get("hits", {}) or {}).get("hits", []) or []
+    return [hit.get("_source", {}) for hit in hits]
+
+
+def _fetch_rows_by_scroll(
+    client: Any,
+    *,
+    index: str,
+    query: Dict[str, Any],
+    page_size: int,
+    scroll_timeout: str,
+    source_fields: Optional[List[str]],
+    max_hits_n: Optional[int],
+    operator: str,
+    config: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    resp = client.search(
+        **_build_search_kwargs(
+            index=index,
+            query=query,
+            size=int(page_size),
+            scroll=scroll_timeout,
+            source_fields=source_fields,
+        )
+    )
+    scroll_id = resp.get("_scroll_id") or resp.get("scroll_id")
+    hits = (resp.get("hits", {}) or {}).get("hits", []) or []
+    hits_sources: List[Dict[str, Any]] = [hit.get("_source", {}) for hit in hits]
+
+    total = len(hits_sources)
+    if total > 0 and not scroll_id:
+        raise OperatorException(
+            "ES scroll 未返回 scroll_id，无法保证全量取回；请显式传入 config.size。",
+            code=ErrorCode.EXTERNAL_SERVICE_ERROR,
+            operator=operator,
+            config=config,
+        )
+
+    try:
+        while hits:
+            if max_hits_n is not None and total >= max_hits_n:
+                raise OperatorException(
+                    f"ES 提取命中数超过 max_hits：{total} >= {max_hits_n}；已为避免 OOM/超时中断。"
+                    f"请增大 max_hits 或调整查询条件。",
+                    code=ErrorCode.RESOURCE_LIMIT_EXCEEDED,
+                    operator=operator,
+                    config=config,
+                )
+            resp = client.scroll(scroll_id=scroll_id, scroll=scroll_timeout)
+            hits = (resp.get("hits", {}) or {}).get("hits", []) or []
+            if not hits:
+                break
+            hits_sources.extend([hit.get("_source", {}) for hit in hits])
+            total = len(hits_sources)
+    finally:
+        if scroll_id:
+            try:
+                client.clear_scroll(scroll_id=scroll_id)
+            except Exception:
+                pass
+
+    return hits_sources
+
+
 @OperatorRegistry.register("es_extract")
 class ESExtractOperator(BaseOperator):
     """从 ES 提取数据。须先 es_connect。
@@ -95,16 +197,15 @@ class ESExtractOperator(BaseOperator):
         try:
             explicit_size = config.get("size", None)
             if explicit_size is not None:
-                size = int(explicit_size)
-                search_kwargs = {"index": index, "query": query, "size": size}
-                if source_fields is not None:
-                    search_kwargs["_source"] = source_fields
-                resp = client.search(**search_kwargs)
-                hits = resp.get("hits", {}).get("hits", []) or []
-                rows = [hit.get("_source", {}) for hit in hits]
-                column_bundle = rows_to_field_list_dict(rows)
-                context.set(ES_EXTRACT_CACHE_CONTEXT_KEY, column_bundle)
-                context.set(context.LATEST_COLUMNS_KEY, column_bundle[0] if column_bundle else {})
+                rows = _fetch_rows_by_size(
+                    client,
+                    index=index,
+                    query=query,
+                    size=int(explicit_size),
+                    source_fields=source_fields,
+                )
+                column_bundle = _finalize_rows(rows, context)
+                print(column_bundle)
                 return column_bundle
 
             page_size = int(config.get("page_size", 1000))
@@ -113,56 +214,19 @@ class ESExtractOperator(BaseOperator):
             scroll_timeout = config.get("scroll_timeout", "2m")
             max_hits = config.get("max_hits")
             max_hits_n = int(max_hits) if max_hits is not None and max_hits != "" else None
-
-            hits_sources: list = []
-            search_kwargs = {
-                "index": index,
-                "query": query,
-                "size": page_size,
-                "scroll": scroll_timeout,
-            }
-            if source_fields is not None:
-                search_kwargs["_source"] = source_fields
-            resp = client.search(**search_kwargs)
-            scroll_id = resp.get("_scroll_id") or resp.get("scroll_id")
-            hits = (resp.get("hits", {}) or {}).get("hits", []) or []
-            hits_sources.extend([hit.get("_source", {}) for hit in hits])
-            total = len(hits_sources)
-
-            if total > 0 and not scroll_id:
-                raise OperatorException(
-                    "ES scroll 未返回 scroll_id，无法保证全量取回；请显式传入 config.size。",
-                    code=ErrorCode.EXTERNAL_SERVICE_ERROR,
-                    operator=self.name,
-                    config=config,
-                )
-
-            try:
-                while hits:
-                    if max_hits_n is not None and total >= max_hits_n:
-                        raise OperatorException(
-                            f"ES 提取命中数超过 max_hits：{total} >= {max_hits_n}；已为避免 OOM/超时中断。"
-                            f"请增大 max_hits 或调整查询条件。",
-                            code=ErrorCode.RESOURCE_LIMIT_EXCEEDED,
-                            operator=self.name,
-                            config=config,
-                        )
-                    resp = client.scroll(scroll_id=scroll_id, scroll=scroll_timeout)
-                    hits = (resp.get("hits", {}) or {}).get("hits", []) or []
-                    if not hits:
-                        break
-                    hits_sources.extend([hit.get("_source", {}) for hit in hits])
-                    total = len(hits_sources)
-            finally:
-                if scroll_id:
-                    try:
-                        client.clear_scroll(scroll_id=scroll_id)
-                    except Exception:
-                        pass
-
-            column_bundle = rows_to_field_list_dict(hits_sources)
-            context.set(ES_EXTRACT_CACHE_CONTEXT_KEY, column_bundle)
-            context.set(context.LATEST_COLUMNS_KEY, column_bundle[0] if column_bundle else {})
+            hits_sources = _fetch_rows_by_scroll(
+                client,
+                index=index,
+                query=query,
+                page_size=page_size,
+                scroll_timeout=scroll_timeout,
+                source_fields=source_fields,
+                max_hits_n=max_hits_n,
+                operator=self.name,
+                config=config,
+            )
+            column_bundle = _finalize_rows(hits_sources, context)
+            print(column_bundle)
             return column_bundle
         except Exception as e:
             raise OperatorException(
