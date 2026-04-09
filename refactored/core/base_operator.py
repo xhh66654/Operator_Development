@@ -64,6 +64,57 @@ def _build_seq_value_keys(max_items: int = 50) -> list[str]:
     return keys
 
 
+_LEGACY_INPUT_KEYS = {
+    # 多来源/字段列表风格
+    "fields",
+    "field",
+    "operands",
+    "inputs",
+    "input",
+    # 常见“数据来源”旧键
+    "source",
+    "source_field",
+    # 二元/多元算术旧键（顺序参数应替代它们）
+    "primary",
+    "secondary",
+    "minuend",
+    "subtrahends",
+    "dividend",
+    "divisors",
+    "numerator",
+    "denominator",
+    "part",
+    "total",
+    "base",
+    "exponent",
+    "vectors",
+    "matrix1",
+    "matrix2",
+    "value",
+}
+
+
+def _reject_legacy_input_keys(operator: str, raw_config: Dict[str, Any]) -> None:
+    """
+    强约束：禁止使用旧“输入指定”键。
+    统一只用 first_value/second_value/third_value... 作为输入来源表达。
+
+    注意：这里不限制算子的“业务参数键”（如 size/page_size/query/decimal_places 等），
+    仅拦截旧输入键，避免影响提取类算子等的其它配置项。
+    """
+    if not isinstance(raw_config, dict) or not raw_config:
+        return
+    bad = [k for k in raw_config.keys() if str(k) in _LEGACY_INPUT_KEYS]
+    if bad:
+        bad_sorted = ", ".join(sorted(set(map(str, bad)))[:20])
+        raise OperatorException(
+            f"{operator} 配置包含不允许的输入键；请仅使用 first_value/second_value/...。发现非法键: {bad_sorted}",
+            code=ErrorCode.CONFIG_FORMAT_ERROR,
+            operator=operator,
+            config=raw_config,
+        )
+
+
 class BaseOperator(ABC):
     """算子基类：统一异常处理、上下文注入、配置校验"""
 
@@ -85,99 +136,15 @@ class BaseOperator(ABC):
 
     def _normalize_sequential_values(self, merged: Dict[str, Any]) -> Dict[str, Any]:
         """
-        统一参数风格：first_calue/first_value... -> 各算子常用参数。
+        统一参数风格：first_value/first_value... -> 各算子常用参数。
         仅用于非提取、非权重算子。
         """
         if self._is_extract_operator() or self._is_weight_operator():
             return merged
 
-        out = dict(merged)
-        #修改冗余，这里除了阈值算子，其他的都采用first_value,second_value....
-        if self.name in {
-            "add",
-            "subtract",
-            "multiply",
-            "divide",
-            "power",
-            "ratio",
-            "proportion",
-            "log",
-            "sin",
-            "cos",
-            "tan",
-            "sqrt",
-            "factorial",
-            "max",
-            "min",
-            "ratio_by_count",
-            "proportion_by_count",
-            "percentile",
-            "weighted_average",
-            "weighted_sum_squares",
-            "weighted_variance",
-            "weighted_std",
-            "weighted_log_sum_square",
-            "weighted_exp_sum_square",
-            "weighted_log_mean",
-            "weighted_exp_mean",
-            "weighted_sum_of_squared_deviations",
-            "min_max_normalize",
-            "cosine_similarity",
-            "euclidean_distance",
-            "angle_between",
-            "vector_angle",
-            "time_add",
-            "time_subtract",
-            "average_time",
-            "precision_round",
-        }:
-            return out
-
-        seq_vals = [out[k] for k in self._SEQ_KEYS if out.get(k) not in (None, "")]
-        if not seq_vals:
-            return out
-
-        if out.get("fields") in (None, ""):
-            out["fields"] = list(seq_vals)
-        if out.get("inputs") in (None, ""):
-            out["inputs"] = list(seq_vals)
-        if out.get("input") in (None, "") and seq_vals:
-            out["input"] = seq_vals[0]
-        if out.get("value") in (None, "") and seq_vals:
-            out["value"] = seq_vals[0]
-        if out.get("primary") in (None, "") and seq_vals:
-            out["primary"] = seq_vals[0]
-        if out.get("secondary") in (None, "") and len(seq_vals) >= 2:
-            out["secondary"] = seq_vals[1] if len(seq_vals) == 2 else seq_vals[1:]
-        if out.get("minuend") in (None, "") and seq_vals:
-            out["minuend"] = seq_vals[0]
-        if out.get("subtrahends") in (None, "") and len(seq_vals) >= 2:
-            out["subtrahends"] = seq_vals[1:] if len(seq_vals) > 2 else [seq_vals[1]]
-        if out.get("dividend") in (None, "") and seq_vals:
-            out["dividend"] = seq_vals[0]
-        if out.get("divisors") in (None, "") and len(seq_vals) >= 2:
-            out["divisors"] = seq_vals[1:] if len(seq_vals) > 2 else [seq_vals[1]]
-        if out.get("numerator") in (None, "") and seq_vals:
-            out["numerator"] = seq_vals[0]
-        if out.get("denominator") in (None, "") and len(seq_vals) >= 2:
-            out["denominator"] = seq_vals[1]
-        if out.get("part") in (None, "") and seq_vals:
-            out["part"] = seq_vals[0]
-        if out.get("total") in (None, "") and len(seq_vals) >= 2:
-            out["total"] = seq_vals[1]
-        if out.get("base") in (None, "") and seq_vals:
-            out["base"] = seq_vals[0]
-        if out.get("exponent") in (None, "") and len(seq_vals) >= 2:
-            out["exponent"] = seq_vals[1]
-        if out.get("vectors") in (None, "") and len(seq_vals) >= 2:
-            out["vectors"] = [seq_vals[0], seq_vals[1]]
-        if out.get("matrix1") in (None, "") and seq_vals:
-            out["matrix1"] = seq_vals[0]
-        if out.get("matrix2") in (None, "") and len(seq_vals) >= 2:
-            out["matrix2"] = seq_vals[1]
-        if out.get("scalar") in (None, "") and len(seq_vals) >= 3:
-            out["scalar"] = seq_vals[2]
-        return out
+        # 已完成全量算子内部改造：输入只允许顺序槽位 first_value/second_value/...
+        # 因此不再将顺序参数回填到任何旧命名，避免旧键在内部“复活”。
+        return dict(merged)
 
     def run(
         self,
@@ -188,6 +155,7 @@ class BaseOperator(ABC):
         """统一入口：合并/规范化配置 -> 校验 -> 执行 -> 异常转 OperatorException"""
         ctx = context or ExecutionContext()
         if isinstance(config, dict):
+            _reject_legacy_input_keys(self.name, config)
             config = self._resolve_config(config)
         try:
             validate_operator_config(self.name, config, self.config_schema)

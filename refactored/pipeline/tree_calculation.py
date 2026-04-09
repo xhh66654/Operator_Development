@@ -269,10 +269,23 @@ def resolve_config_refs(value: Any, ctx: ExecutionContext) -> Any:
         s = value.strip()
         single = _resolve_single_context_ref_string(s, ctx)
         if single is not _NOT_A_SINGLE_CONTEXT_REF:
+            # 严格模式：若形如 "${610111}" 的上下文引用解析为 None，直接报错。
+            # 常见原因：容器节点（无 operator_key 但有 steps）没有把“最后一步结果”写入 ctx，导致 ${容器id} 取不到值。
+            if single is None:
+                raise OperatorException(
+                    f"上下文引用未取到值: {s}（可能是容器节点未写入 ctx，或该节点未执行/无最后结果）",
+                    code=ErrorCode.DATA_NOT_FOUND,
+                )
             return single
         m = _REF_FULL.match(s)
         if m:
-            return _ctx_lookup(ctx, m.group(1))
+            got = _ctx_lookup(ctx, m.group(1))
+            if got is None:
+                raise OperatorException(
+                    f"上下文引用未取到值: {s}（可能是容器节点未写入 ctx，或该节点未执行/无最后结果）",
+                    code=ErrorCode.DATA_NOT_FOUND,
+                )
+            return got
         if "${" not in s:
             return value
 
@@ -325,7 +338,13 @@ def run_operator_chain(chain_steps: List[Any], ctx: ExecutionContext) -> Any:
         if not isinstance(item, dict):
             continue
         if item.get("steps") and not str(item.get("operator_key") or "").strip():
+            # 容器节点（无 operator_key，仅包一层 steps）：自身结果取最后一步子节点结果，
+            # 需要写入 ctx 以支持 ${container_id} 引用。
             last_dv = run_operator_chain(item["steps"], ctx)
+            raw_key = item.get("id") or item.get("node_id") or item.get("step_key")
+            step_key = str(raw_key).strip() if raw_key is not None else ""
+            if step_key:
+                ctx.set(step_key, _pythonize(last_dv))
             continue
         op_key = item.get("operator_key") or item.get("operator")
         if not op_key:
@@ -391,6 +410,16 @@ def exec_metric_subtree(node: Any, ctx: ExecutionContext) -> None:
             )
         val = _pythonize(dv)
         _store_node_outputs(ctx, node, val)
+        return
+
+    # 容器节点（无 operator_key 但有 steps）：将最后一个子节点结果写入自身 id，供 ${id} 引用。
+    steps = node.get("steps") or []
+    if isinstance(steps, list) and steps:
+        last_child = steps[-1] if isinstance(steps[-1], dict) else None
+        if isinstance(last_child, dict):
+            last_val = _lookup_node_result(last_child, ctx)
+            if last_val is not None:
+                _store_node_outputs(ctx, node, _unwrap_single_scalar_list(last_val))
 
 
 def _lookup_node_result(node: Dict[str, Any], ctx: ExecutionContext) -> Any:

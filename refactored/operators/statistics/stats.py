@@ -27,9 +27,10 @@ except ImportError:
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...core.exceptions import OperatorException, ErrorCode
-from .._common import get_value, _ctx, to_number, normalize_config_to_fields
+from .._common import get_value, _ctx, to_number
 
 logger = logging.getLogger(__name__)
+
 
 
 def _ensure_number_list(v: Any) -> List[float]:
@@ -66,35 +67,23 @@ def _ensure_number_list(v: Any) -> List[float]:
 
 def _collect_values(data: Dict, config: Dict, context: ExecutionContext) -> List[float]:
     """
-    从 config 的 operands/fields 收集数值（数据来源：接口字段名或 ${step_key}）。
-    _resolve_config 已将 operands/field 合并进 fields，此处读 fields，缺省时回退 operands/field。
+    从顺序参数 first_value/second_value/... 收集数值（数据来源：接口字段名或 ${step_key}）。
+    说明：仅从顺序槽位取数，不做旧键兼容读取。
     """
     values: List[float] = []
-    fields = config.get("fields") or config.get("inputs") or config.get("operands") or []
-
-    if not fields:
-        field = config.get("field")
-        if field is None:
-            field = config.get("input")
-        if field is not None:
-            fields = field if isinstance(field, list) else [field]
-    # 兼容顺序参数：允许统计类算子直接用 first_value/second_value/... 指定数据来源（含 ${step}.field）。
-    if not fields:
-        seq_keys = [
-            "first_value",
-            "second_value",
-            "third_value",
-            "fourth_value",
-            "fifth_value",
-            "sixth_value",
-            "seventh_value",
-            "eighth_value",
-            "ninth_value",
-            "tenth_value",
-        ]
-        seq_fields = [config.get(k) for k in seq_keys if config.get(k) not in (None, "")]
-        if seq_fields:
-            fields = seq_fields
+    seq_keys = [
+        "first_value",
+        "second_value",
+        "third_value",
+        "fourth_value",
+        "fifth_value",
+        "sixth_value",
+        "seventh_value",
+        "eighth_value",
+        "ninth_value",
+        "tenth_value",
+    ]
+    fields = [config.get(k) for k in seq_keys if config.get(k) not in (None, "")]
 
     def extend_with(val: Any) -> None:
         values.extend(_ensure_number_list(val))
@@ -153,18 +142,35 @@ def _weights_flat(
 def _resolve_first_second_values_weights(merged: Dict[str, Any]) -> Dict[str, Any]:
     """
     顺序参数：first_value=观测值，second_value=权重。
-    若不处理，_collect_values 会把 first/second 都当样本拼接；weights 为空时 _weights_flat 会退化为全 1；非空权重须与样本等长。
-    若已配置非空 weights，仍强制 fields=[first_value]，避免 second_value 被当第二路数据。
+
+    约定：
+    - 观测值只来自 first_value（不把 second_value 当样本参与统计）
+    - 权重优先来自 second_value（若显式传入）
     """
     fv = merged.get("first_value")
     sv = merged.get("second_value")
     if fv in (None, "") or sv in (None, ""):
         return merged
     out = dict(merged)
-    out["fields"] = [fv]
-    if not out.get("weights"):
-        out["weights"] = sv
+    # second_value 为显式顺序槽位输入，应覆盖默认/具名 weights
+    out["weights"] = sv
     return out
+
+
+def _collect_values_first_only(data: Dict, config: Dict, context: ExecutionContext, *, operator: str) -> List[float]:
+    """
+    加权类算子专用：仅从 first_value 收集样本，避免 second_value（权重）被当作样本拼接。
+    """
+    fv = config.get("first_value")
+    raw = get_value(data, fv, context)
+    if raw is None:
+        raise OperatorException(
+            f"{operator} 未取到任何观测值（first_value 为空或引用缺失）",
+            code=ErrorCode.DATA_NOT_FOUND,
+            operator=operator,
+            config=config,
+        )
+    return _ensure_number_list(raw)
 
 
 def _list_element_count(raw: Any) -> float:
@@ -300,9 +306,7 @@ class ArithmeticMeanOperator(BaseOperator):
     例: [10, 20, 30] 的算术平均值 = 60/3 = 20
     
     配置参数：
-    - fields (array): 数据源字段列表
-    - operands (array): 同fields，备选参数
-    - field (any): 单个字段时使用
+    - first_value/second_value/third_value...：按顺序提供样本来源（字段名、${step_key} 或字面量）
     
     输入数据格式：
     base_data: {
@@ -315,7 +319,9 @@ class ArithmeticMeanOperator(BaseOperator):
     {
         "operator": "arithmetic_mean",
         "config": {
-            "fields": ["score1", "score2", "score3"]
+            "first_value": "score1",
+            "second_value": "score2",
+            "third_value": "score3"
         }
     }
     
@@ -337,14 +343,13 @@ class ArithmeticMeanOperator(BaseOperator):
     - 性能指标平均
     """
     name = "arithmetic_mean"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -357,14 +362,13 @@ class ArithmeticMeanOperator(BaseOperator):
 class HarmonicMeanOperator(BaseOperator):
     """调和平均数：n / (1/x1 + 1/x2 + … + 1/xn)。常用于平均速率、平均价格。"""
     name = "harmonic_mean"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -380,14 +384,13 @@ class HarmonicMeanOperator(BaseOperator):
 class GeometricMeanOperator(BaseOperator):
     """几何平均数：(x1*x2*…*xn)^(1/n)。常用于增长率、比例的平均。"""
     name = "geometric_mean"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -404,24 +407,27 @@ class WeightedAverageOperator(BaseOperator):
     """加权平均值：(w1*x1 + w2*x2 + … + wn*xn) / (w1+w2+…+wn)。"""
     name = "weighted_average"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"}, "fields": {"type": "array"}, "field": {},
         "weights": {"type": "array"},
-        "first_value": {},
-        "second_value": {},
+        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {},
     }}
-    default_config = {"fields": [], "weights": []}
+    default_config = {"weights": []}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
         merged = _resolve_first_second_values_weights(merged)
-        return normalize_config_to_fields(merged)
+        return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _collect_values_first_only(data, config, context, operator=self.name)
         if not values:
-            return 0.0
+            raise OperatorException(
+                "weighted_average 未取到任何观测值（顺序槽位解析后为空或引用缺失）",
+                code=ErrorCode.DATA_NOT_FOUND,
+                operator=self.name,
+                config=config,
+            )
         weights = _weights_flat(data, config.get("weights"), context, len(values), operator=self.name, config=config)
         total_w = sum(weights)
         if total_w == 0:
@@ -444,7 +450,7 @@ class MedianOperator(BaseOperator):
     例: [1, 3, 5] → 3, [1, 2, 3, 4] → 2.5
     
     配置参数：
-    - fields (array): 数据源字段列表
+    - first_value/second_value/third_value...：按顺序提供样本来源（字段名、${step_key} 或字面量）
     
     输入数据格式：
     base_data: {
@@ -455,7 +461,7 @@ class MedianOperator(BaseOperator):
     {
         "operator": "median",
         "config": {
-            "fields": ["values"]
+            "first_value": "values"
         }
     }
     
@@ -473,20 +479,19 @@ class MedianOperator(BaseOperator):
     - 数据质量评估
     """
     name = "median"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
         if not values:
             raise OperatorException(
-                "median 未收集到任何数值（请检查 fields/operands/first_value 是否能取到值；"
+                "median 未收集到任何数值（请检查 first_value/second_value/... 是否能取到值；"
                 "若引用了 ${step}.field，请确保该 step 在本节点之前已执行）",
                 code=ErrorCode.DATA_NOT_FOUND,
                 operator=self.name,
@@ -499,9 +504,6 @@ class MedianOperator(BaseOperator):
 class ModeOperator(BaseOperator):
     name = "mode"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"},
-        "fields": {"type": "array"},
-        "field": {},
         "first_value": {},
         "second_value": {},
         "third_value": {},
@@ -513,17 +515,16 @@ class ModeOperator(BaseOperator):
         "ninth_value": {},
         "tenth_value": {},
     }}
-    default_config = {"fields": []}
+    default_config = {}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
         if not values:
             raise OperatorException(
-                "mode 未收集到任何数值（请检查 fields/operands/first_value 等是否能取到值）",
+                "mode 未收集到任何数值（请检查 first_value/second_value/... 是否能取到值）",
                 code=ErrorCode.DATA_NOT_FOUND,
                 operator=self.name,
                 config=config,
@@ -541,14 +542,13 @@ class ModeOperator(BaseOperator):
 @OperatorRegistry.register("range")
 class RangeOperator(BaseOperator):
     name = "range"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -560,14 +560,13 @@ class RangeOperator(BaseOperator):
 @OperatorRegistry.register("std_dev")
 class StdDevOperator(BaseOperator):
     name = "std_dev"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -579,14 +578,13 @@ class StdDevOperator(BaseOperator):
 @OperatorRegistry.register("variance")
 class VarianceOperator(BaseOperator):
     name = "variance"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -672,14 +670,22 @@ class DeclineRateOperator(BaseOperator):
 class PercentageOperator(BaseOperator):
     """百分比计算：part / total * 100（列表按元素求和，见 `to_number`）。"""
     name = "percentage"
-    config_schema = {"type": "object", "properties": {"part": {}, "total": {}}}
+    config_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["first_value", "second_value"],
+        "properties": {"first_value": {}, "second_value": {}},
+    }
     default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
+    def _resolve_config(self, config):
+        return super()._resolve_config(config)
+
     def execute(self, data, config, context: ExecutionContext):
-        part_val = to_number(get_value(data, config.get("part"), context))
-        total_val = to_number(get_value(data, config.get("total"), context))
+        part_val = to_number(get_value(data, config.get("first_value"), context))
+        total_val = to_number(get_value(data, config.get("second_value"), context))
         if total_val == 0:
             raise OperatorException(
                 "百分比算子 total(总体) 不能为 0",
@@ -694,14 +700,19 @@ class PercentageOperator(BaseOperator):
 class PercentageByCountOperator(BaseOperator):
     """条数占比：len(part) / len(total) * 100（非列表视为 1 条，None 为 0 条）。"""
     name = "percentage_by_count"
-    config_schema = {"type": "object", "properties": {"part": {}, "total": {}}}
+    config_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["first_value", "second_value"],
+        "properties": {"first_value": {}, "second_value": {}},
+    }
     default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def execute(self, data, config, context: ExecutionContext):
-        part_val = _list_element_count(get_value(data, config.get("part"), context))
-        total_val = _list_element_count(get_value(data, config.get("total"), context))
+        part_val = _list_element_count(get_value(data, config.get("first_value"), context))
+        total_val = _list_element_count(get_value(data, config.get("second_value"), context))
         if total_val == 0:
             raise OperatorException(
                 "percentage_by_count 的 total 条数不能为 0",
@@ -718,17 +729,17 @@ class PercentageByCountOperator(BaseOperator):
 class WeightedSumSquaresOperator(BaseOperator):
     name = "weighted_sum_squares"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}, "weights": {"type": "array"},
-        "first_value": {}, "second_value": {},
+        "weights": {"type": "array"},
+        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {},
     }}
-    default_config = {"fields": [], "weights": []}
+    default_config = {"weights": []}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
         merged = _resolve_first_second_values_weights(merged)
-        return normalize_config_to_fields(merged)
+        return merged
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -739,14 +750,13 @@ class WeightedSumSquaresOperator(BaseOperator):
 @OperatorRegistry.register("sum_squares")
 class SumSquaresOperator(BaseOperator):
     name = "sum_squares"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -758,27 +768,16 @@ class SumSquaresOperator(BaseOperator):
 @OperatorRegistry.register("percentile")
 class PercentileOperator(BaseOperator):
     name = "percentile"
-    config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"},
-        "fields": {"type": "array"},
-        "field": {},
-        "percentile": {},
-        # 兼容顺序参数：first_value/second_value
-        "first_value": {},
-        "second_value": {},
-    }}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "percentile": {}}}
     # 不在 default_config 里写 percentile：否则合并后始终为 50，second_value 无法写入 percentile
-    default_config = {"fields": []}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
-        # second_value 表示分位点（0~100），须在 normalize_config_to_fields 之前写入 percentile，
-        # 否则旧逻辑会把 first_value+second_value 都塞进 fields，样本里混入分位点数值。
         if merged.get("percentile") in (None, "") and merged.get("second_value") not in (None, ""):
             merged["percentile"] = merged.get("second_value")
-        merged = normalize_config_to_fields(merged)
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
@@ -790,7 +789,7 @@ class PercentileOperator(BaseOperator):
             values = _collect_values(data, config, context)
         if not values:
             raise OperatorException(
-                "percentile 未收集到任何数值（请检查 fields/operands/first_value 是否能取到值）",
+                "percentile 未收集到任何数值（请检查 first_value/second_value/... 是否能取到值）",
                 code=ErrorCode.DATA_NOT_FOUND,
                 operator=self.name,
                 config=config,
@@ -824,14 +823,13 @@ class PercentileOperator(BaseOperator):
 @OperatorRegistry.register("cv")
 class CvOperator(BaseOperator):
     name = "cv"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -848,14 +846,13 @@ class CvOperator(BaseOperator):
 @OperatorRegistry.register("quartiles")
 class QuartilesOperator(BaseOperator):
     name = "quartiles"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "list"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -882,14 +879,13 @@ class QuartilesOperator(BaseOperator):
 @OperatorRegistry.register("iqr")
 class IqrOperator(BaseOperator):
     name = "iqr"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -915,20 +911,20 @@ class IqrOperator(BaseOperator):
 class WeightedVarianceOperator(BaseOperator):
     name = "weighted_variance"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}, "weights": {"type": "array"},
-        "first_value": {}, "second_value": {},
+        "weights": {"type": "array"},
+        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {},
     }}
-    default_config = {"fields": [], "weights": []}
+    default_config = {"weights": []}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
         merged = _resolve_first_second_values_weights(merged)
-        return normalize_config_to_fields(merged)
+        return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _collect_values_first_only(data, config, context, operator=self.name)
         if not values:
             return 0.0
         weights = _weights_flat(data, config.get("weights"), context, len(values), operator=self.name, config=config)
@@ -944,20 +940,20 @@ class WeightedStdOperator(BaseOperator):
     """加权标准差::√[Σ(wi*(vi - μ)²) / Σwi]，其中μ=Σ(wi*vi)/Σwi。"""
     name = "weighted_std"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}, "weights": {"type": "array"},
-        "first_value": {}, "second_value": {},
+        "weights": {"type": "array"},
+        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {},
     }}
-    default_config = {"fields": [], "weights": []}
+    default_config = {"weights": []}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
         merged = _resolve_first_second_values_weights(merged)
-        return normalize_config_to_fields(merged)
+        return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _collect_values_first_only(data, config, context, operator=self.name)
         if not values:
             return 0.0
         weights = _weights_flat(data, config.get("weights"), context, len(values), operator=self.name, config=config)
@@ -973,14 +969,13 @@ class WeightedStdOperator(BaseOperator):
 class TrimmedMeanOperator(BaseOperator):
     """截尾均值：去掉极端值后计算平均值"""
     name = "trimmed_mean"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}, "trim_percent": {"type": "number"}}}
-    default_config = {"fields": [], "trim_percent": 0.1}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "trim_percent": {"type": "number"}}}
+    default_config = {"trim_percent": 0.1}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -999,14 +994,13 @@ class TrimmedMeanOperator(BaseOperator):
 class WinsorizedMeanOperator(BaseOperator):
     """缩尾均值：极端值替换为临界值后计算平均值"""
     name = "winsorized_mean"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}, "winsor_percent": {"type": "number"}}}
-    default_config = {"fields": [], "winsor_percent": 0.1}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "winsor_percent": {"type": "number"}}}
+    default_config = {"winsor_percent": 0.1}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -1030,7 +1024,7 @@ class WinsorizedMeanOperator(BaseOperator):
 class FrequencyOperator(BaseOperator):
     """频数：统计值在列表中出现的次数"""
     name = "frequency"
-    config_schema = {"type": "object", "properties": {"field": {}, "input": {}, "target_value": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "target_value": {}}}
     default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
@@ -1042,7 +1036,7 @@ class FrequencyOperator(BaseOperator):
         return c
 
     def execute(self, data, config, context: ExecutionContext):
-        val = get_value(data, config.get("field") or config.get("input"), context)
+        val = get_value(data, config.get("first_value"), context)
         target = get_value(data, config.get("target_value"), context)
         if not isinstance(val, list):
             val = [val] if val is not None else []
@@ -1053,7 +1047,7 @@ class FrequencyOperator(BaseOperator):
 class RelativeFrequencyOperator(BaseOperator):
     """频率：值出现的次数 / 总数"""
     name = "relative_frequency"
-    config_schema = {"type": "object", "properties": {"field": {}, "input": {}, "target_value": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "target_value": {}}}
     default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
@@ -1065,7 +1059,7 @@ class RelativeFrequencyOperator(BaseOperator):
         return c
 
     def execute(self, data, config, context: ExecutionContext):
-        val = get_value(data, config.get("field") or config.get("input"), context)
+        val = get_value(data, config.get("first_value"), context)
         target = get_value(data, config.get("target_value"), context)
         if not isinstance(val, list):
             val = [val] if val is not None else []
@@ -1079,14 +1073,13 @@ class RelativeFrequencyOperator(BaseOperator):
 class MeanSquareOperator(BaseOperator):
     """均方：Σ(xi²) / n"""
     name = "mean_square"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -1099,14 +1092,13 @@ class MeanSquareOperator(BaseOperator):
 class RootMeanSquareOperator(BaseOperator):
     """均方根：sqrt(Σ(xi²) / n)"""
     name = "root_mean_square"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -1120,14 +1112,13 @@ class RootMeanSquareOperator(BaseOperator):
 class LogSumSquareOperator(BaseOperator):
     """对数平方和：Σ(ln(xi)²)"""
     name = "log_sum_square"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -1146,17 +1137,17 @@ class WeightedLogSumSquareOperator(BaseOperator):
     """加权对数平方和：Σ(w * ln(xi)²)"""
     name = "weighted_log_sum_square"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}, "weights": {"type": "array"},
-        "first_value": {}, "second_value": {},
+        "weights": {"type": "array"},
+        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {},
     }}
-    default_config = {"fields": [], "weights": []}
+    default_config = {"weights": []}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
         merged = _resolve_first_second_values_weights(merged)
-        return normalize_config_to_fields(merged)
+        return merged
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -1175,14 +1166,13 @@ class WeightedLogSumSquareOperator(BaseOperator):
 class ExpSumSquareOperator(BaseOperator):
     """指数平方和：Σ(e^(xi)²)"""
     name = "exp_sum_square"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -1196,17 +1186,17 @@ class WeightedExpSumSquareOperator(BaseOperator):
     """加权指数平方和：Σ(w * e^(xi)²)"""
     name = "weighted_exp_sum_square"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}, "weights": {"type": "array"},
-        "first_value": {}, "second_value": {},
+        "weights": {"type": "array"},
+        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {},
     }}
-    default_config = {"fields": [], "weights": []}
+    default_config = {"weights": []}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
         merged = _resolve_first_second_values_weights(merged)
-        return normalize_config_to_fields(merged)
+        return merged
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -1221,17 +1211,17 @@ class WeightedLogMeanOperator(BaseOperator):
     """加权对数均值：Σ(w * ln(xi)) / Σ(w)"""
     name = "weighted_log_mean"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}, "weights": {"type": "array"},
-        "first_value": {}, "second_value": {},
+        "weights": {"type": "array"},
+        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {},
     }}
-    default_config = {"fields": [], "weights": []}
+    default_config = {"weights": []}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
         merged = _resolve_first_second_values_weights(merged)
-        return normalize_config_to_fields(merged)
+        return merged
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -1254,17 +1244,17 @@ class WeightedExpMeanOperator(BaseOperator):
     """加权指数均值：Σ(w * e^(xi)) / Σ(w)"""
     name = "weighted_exp_mean"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}, "weights": {"type": "array"},
-        "first_value": {}, "second_value": {},
+        "weights": {"type": "array"},
+        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {},
     }}
-    default_config = {"fields": [], "weights": []}
+    default_config = {"weights": []}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
         merged = _resolve_first_second_values_weights(merged)
-        return normalize_config_to_fields(merged)
+        return merged
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -1281,16 +1271,16 @@ class WeightedExpMeanOperator(BaseOperator):
 class CountItemsOperator(BaseOperator):
     """
     总数算子：计算列表总数（长度）。
-    config: field（必填，列表数据来源）。
+    输入：first_value（必填，列表数据来源）。
     """
     name = "count_items"
-    config_schema = {"type": "object", "properties": {"field": {}, "input": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}}}
     default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def execute(self, data, config, context: ExecutionContext):
-        val = get_value(data, config.get("field") or config.get("input"), context)
+        val = get_value(data, config.get("first_value"), context)
         if val is None:
             return 0
         if not isinstance(val, list):

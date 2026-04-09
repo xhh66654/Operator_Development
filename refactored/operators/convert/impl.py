@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...core.exceptions import OperatorException, ErrorCode
 from ...utils import safe_convert_to_number
-from .._common import get_value, normalize_config_source_field, normalize_punct
+from .._common import get_value, normalize_punct
 
 
 def _ensure_list(val):
@@ -104,19 +104,16 @@ def _input_value(data: Dict[str, Any], ref: Any, context: ExecutionContext) -> A
 
 @OperatorRegistry.register("as_number")
 class AsNumberOperator(BaseOperator):
-    """字符串转数字；数据来源为 source/field。"""
+    """字符串转数字；数据来源为 first_value。"""
     name = "as_number"
-    config_schema = {"type": "object", "properties": {"field": {}, "source_field": {}, "source": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}}}
     default_config = {}
 
     def _resolve_config(self, config):
-        merged = normalize_config_source_field(
-            super()._resolve_config(config), canonical_key="field", legacy_keys=("source_field", "source")
-        )
-        return merged
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        ref = config.get("field") or config.get("source")
+        ref = config.get("first_value")
         val = get_value(data, ref, context)
         if val is None:
             return None
@@ -127,19 +124,16 @@ class AsNumberOperator(BaseOperator):
 
 @OperatorRegistry.register("as_string")
 class AsStringOperator(BaseOperator):
-    """转文本；数据来源统一为 field，兼容 source_field。"""
+    """转文本；数据来源为 first_value。"""
     name = "as_string"
-    config_schema = {"type": "object", "properties": {"field": {}, "source_field": {}, "source": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}}}
     default_config = {}
 
     def _resolve_config(self, config):
-        merged = normalize_config_source_field(
-            super()._resolve_config(config), canonical_key="field", legacy_keys=("source_field", "source")
-        )
-        return merged
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        ref = config.get("field") or config.get("source")
+        ref = config.get("first_value")
         val = get_value(data, ref, context)
         if val is None:
             return None
@@ -161,17 +155,14 @@ class ToBoolOperator(BaseOperator):
     其他值均为 False
     """
     name = "to_bool"
-    config_schema = {"type": "object", "properties": {"field": {}, "source_field": {}, "source": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}}}
     default_config = {}
 
     def _resolve_config(self, config):
-        merged = normalize_config_source_field(
-            super()._resolve_config(config), canonical_key="field", legacy_keys=("source_field", "source")
-        )
-        return merged
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        ref = config.get("field") or config.get("source")
+        ref = config.get("first_value")
         val = get_value(data, ref, context)
         if val is None:
             return None
@@ -200,21 +191,19 @@ class ToBoolOperator(BaseOperator):
 
 @OperatorRegistry.register("split_string")
 class SplitStringOperator(BaseOperator):
-    """字符串→列表；数据来源为 source/field；separator 为前端配置。"""
+    """字符串→列表；数据来源为 first_value；separator 为 second_value。"""
     name = "split_string"
-    config_schema = {"type": "object", "properties": {"field": {}, "source_field": {}, "source": {}, "separator": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "separator": {}}}
     default_config = {}
 
     def _resolve_config(self, config):
-        merged = normalize_config_source_field(
-            super()._resolve_config(config), canonical_key="field", legacy_keys=("source_field", "source")
-        )
+        merged = super()._resolve_config(config)
         if merged.get("separator") in (None, "") and merged.get("second_value") not in (None, ""):
             merged["separator"] = merged.get("second_value")
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        ref = config.get("field") or config.get("source")
+        ref = config.get("first_value")
         val = get_value(data, ref, context)
         if val is None:
             return None
@@ -234,15 +223,13 @@ class SplitStringOperator(BaseOperator):
 
 @OperatorRegistry.register("join_list")
 class JoinListOperator(BaseOperator):
-    """列表→字符串；数据来源为 source/field；separator、quote_elements 为前端配置。"""
+    """列表→字符串；数据来源为 first_value；separator 为 second_value；quote_elements 为 third_value。"""
     name = "join_list"
-    config_schema = {"type": "object", "properties": {"field": {}, "source_field": {}, "source": {}, "separator": {}, "quote_elements": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "separator": {}, "quote_elements": {}}}
     default_config = {"separator": ",", "quote_elements": False}
 
     def _resolve_config(self, config):
-        merged = normalize_config_source_field(
-            super()._resolve_config(config), canonical_key="field", legacy_keys=("source_field", "source")
-        )
+        merged = super()._resolve_config(config)
         if merged.get("separator") in (None, "") and merged.get("second_value") not in (None, ""):
             merged["separator"] = merged.get("second_value")
         if merged.get("quote_elements") in (None, "") and merged.get("third_value") not in (None, ""):
@@ -250,7 +237,7 @@ class JoinListOperator(BaseOperator):
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        ref = config.get("field") or config.get("source")
+        ref = config.get("first_value")
         val = get_value(data, ref, context)
         if val is None:
             return None
@@ -278,19 +265,14 @@ class RowsToColumnsOperator(BaseOperator):
     也兼容提取类列包 [{col:[...]}]，会原样输出为列字典。
     """
     name = "rows_to_columns"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "field": {}, "source_field": {}, "source": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}}}
     default_config = {}
 
     def _resolve_config(self, config):
-        merged = normalize_config_source_field(
-            super()._resolve_config(config), canonical_key="field", legacy_keys=("source_field", "source")
-        )
-        if merged.get("field") in (None, "") and merged.get("first_value") not in (None, ""):
-            merged["field"] = merged.get("first_value")
-        return merged
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        ref = config.get("field") or config.get("source")
+        ref = config.get("first_value")
         raw = _input_value(data, ref, context)
         cols = _unwrap_column_bundle_to_columns_dict(raw)
         if cols is not None:
@@ -316,19 +298,14 @@ class ColumnsToRowsOperator(BaseOperator):
     也兼容提取类列包 [{col:[...]}]。
     """
     name = "columns_to_rows"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "field": {}, "source_field": {}, "source": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}}}
     default_config = {}
 
     def _resolve_config(self, config):
-        merged = normalize_config_source_field(
-            super()._resolve_config(config), canonical_key="field", legacy_keys=("source_field", "source")
-        )
-        if merged.get("field") in (None, "") and merged.get("first_value") not in (None, ""):
-            merged["field"] = merged.get("first_value")
-        return merged
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        ref = config.get("field") or config.get("source")
+        ref = config.get("first_value")
         raw = _input_value(data, ref, context)
         cols = _unwrap_column_bundle_to_columns_dict(raw)
         if cols is None:

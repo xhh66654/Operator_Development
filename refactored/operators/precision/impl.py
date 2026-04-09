@@ -1,7 +1,8 @@
-"""精度控制算子：中间高精度，结果统一约分到指定小数位。数据来源为 source/field；decimal_places 为前端配置。"""
+"""精度控制算子：中间高精度，结果统一约分到指定小数位。数据来源为 first_value；decimal_places 为 second_value。"""
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
+from ...core.exceptions import OperatorException, ErrorCode
 from ...utils import safe_convert_to_number
 from .._common import get_value
 
@@ -39,8 +40,6 @@ class PrecisionRoundOperator(BaseOperator):
         "type": "object",
         "properties": {
             "decimal_places": {"type": "integer"},
-            "source": {},
-            "field": {},
             "expression": {},
             "first_value": {},
             "second_value": {},
@@ -51,12 +50,6 @@ class PrecisionRoundOperator(BaseOperator):
 
     def _resolve_config(self, config):
         c = super()._resolve_config(config)
-        if c.get("field") in (None, "") and c.get("source") in (None, "") and c.get("expression") in (None, ""):
-            for k in ("first_value", "value", "input", "primary"):
-                v = c.get(k)
-                if v not in (None, ""):
-                    c["field"] = v
-                    break
         if c.get("decimal_places") in (None, ""):
             for k in ("second_value",):
                 v = c.get(k)
@@ -70,11 +63,25 @@ class PrecisionRoundOperator(BaseOperator):
     def execute(self, data, config, context: ExecutionContext):
         dp = config.get("decimal_places")
         decimal_places = dp if dp is not None else get_precision(context)
-        field_or_expr = config.get("source") or config.get("field") or config.get("expression")
+        field_or_expr = config.get("expression")
+        if field_or_expr in (None, ""):
+            field_or_expr = config.get("first_value")
         if field_or_expr is None:
-            return round_to_precision(0, decimal_places)
+            raise OperatorException(
+                "precision_round 缺少数据来源（first_value 或 expression）",
+                code=ErrorCode.CONFIG_MISSING,
+                operator=self.name,
+                config=config,
+            )
         value = get_value(data, field_or_expr, context)
         if isinstance(value, list):
             return [round_to_precision(safe_convert_to_number(v), decimal_places) for v in value]
         num = safe_convert_to_number(value)
-        return round_to_precision(num if num is not None else 0, decimal_places)
+        if num is None:
+            raise OperatorException(
+                f"precision_round 数据来源无法转为数字: {field_or_expr}",
+                code=ErrorCode.DATA_NOT_FOUND,
+                operator=self.name,
+                config=config,
+            )
+        return round_to_precision(num, decimal_places)

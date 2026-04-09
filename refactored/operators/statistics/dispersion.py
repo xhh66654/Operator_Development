@@ -3,7 +3,6 @@ import statistics
 from typing import Any, Dict
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
-from .._common import normalize_config_to_fields
 from .stats import _collect_values, _resolve_first_second_values_weights, _weights_flat
 
 
@@ -11,14 +10,13 @@ from .stats import _collect_values, _resolve_first_second_values_weights, _weigh
 class DispersionOperator(BaseOperator):
     """离散程度：标准差与均值之比（变异系数同类）。"""
     name = "dispersion"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -35,14 +33,13 @@ class DispersionOperator(BaseOperator):
 class SumOfSquaredDeviationsOperator(BaseOperator):
     """离均差平方和：Σ(xi - x̄)²"""
     name = "sum_of_squared_deviations"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}}}
+    default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -57,17 +54,17 @@ class WeightedSumOfSquaredDeviationsOperator(BaseOperator):
     """加权离均差平方和：Σ(w * (xi - x̄)²)"""
     name = "weighted_sum_of_squared_deviations"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}, "weights": {"type": "array"},
-        "first_value": {}, "second_value": {},
+        "weights": {"type": "array"},
+        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {},
     }}
-    default_config = {"fields": [], "weights": []}
+    default_config = {"weights": []}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
         merged = _resolve_first_second_values_weights(merged)
-        return normalize_config_to_fields(merged)
+        return merged
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)

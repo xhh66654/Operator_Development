@@ -34,35 +34,12 @@ def _flatten_to_numbers(val) -> list:
 
 
 def _collect_numbers(data, config, context, operator_name: str) -> list:
-    """从 config.operands/fields/field 收集数据源（接口字段名或 ${step_key}），摊平为数值列表。"""
-    fields = config.get("fields") or config.get("operands")
-    if not fields or not isinstance(fields, list):
-        single = config.get("field")
-        if single is None or single == "":
-            raise OperatorException(
-                "请指定至少一个数据来源（operands、field 或 fields）",
-                code=ErrorCode.CONFIG_MISSING,
-                operator=operator_name,
-                config=config,
-            )
-        fields = [single]
-    numbers = []
-    for i, key in enumerate(fields):
-        if key is None or key == "":
-            continue
-        val = get_value(data, key, context)
-        if val is None:
-            raise OperatorException(
-                f"数据源为空或未找到（第{i + 1}项）: {key}。请确认请求中 record 包含该字段，或上一步 step_key 正确",
-                code=ErrorCode.DATA_NOT_FOUND,
-                operator=operator_name,
-                config=config,
-            )
-        numbers.extend(_flatten_to_numbers(val))
+    """仅从 first_value/second_value/... 收集数据源并摊平为数值列表。"""
+    numbers = _collect_numbers_from_seq_values(data, config, context, operator_name)
     if not numbers:
         raise OperatorException(
-            "所有数据源中无有效数值，无法取最大/最小值",
-            code=ErrorCode.DATA_NOT_FOUND,
+            "请至少提供 first_value（可继续提供 second_value/third_value...）作为数据来源",
+            code=ErrorCode.CONFIG_MISSING,
             operator=operator_name,
             config=config,
         )
@@ -110,9 +87,7 @@ class MaxOperator(BaseOperator):
     result = max(all_values)
     
     配置参数：
-    - fields (array): 数据源字段列表
-    - operands (array): 同fields
-    - field (any): 单个字段
+    - first_value/second_value/third_value...：按顺序提供待比较的数值来源（字段名、${step_key} 或字面量）
     
     输入数据格式：
     base_data: {
@@ -125,7 +100,9 @@ class MaxOperator(BaseOperator):
     {
         "operator": "max",
         "config": {
-            "fields": ["sales1", "sales2", "sales3"]
+            "first_value": "sales1",
+            "second_value": "sales2",
+            "third_value": "sales3"
         }
     }
     
@@ -173,7 +150,7 @@ class MinOperator(BaseOperator):
     result = min(all_values)
     
     配置参数：
-    - fields (array): 数据源字段列表
+    - first_value/second_value/third_value...：按顺序提供待比较的数值来源
     
     输入数据格式：
     base_data: {
@@ -186,7 +163,9 @@ class MinOperator(BaseOperator):
     {
         "operator": "min",
         "config": {
-            "fields": ["price1", "price2", "price3"]
+            "first_value": "price1",
+            "second_value": "price2",
+            "third_value": "price3"
         }
     }
     
@@ -231,7 +210,7 @@ class CompareThresholdOperator(BaseOperator):
     - third_value: compare_type（gt/lt/ge/le/eq，默认 eq）
     - fourth_value: result_mapping（如 {"true":"PASS","false":"FAIL"}）
 
-    兼容旧参数名：field/source/threshold/compare_type/result_mapping。
+    说明：仅支持顺序槽位 first_value/second_value/third_value/fourth_value。
     """
     name = "compare_threshold"
     config_schema = {
@@ -241,11 +220,6 @@ class CompareThresholdOperator(BaseOperator):
             "second_value": {},
             "third_value": {},
             "fourth_value": {},
-            "field": {},
-            "source": {},
-            "threshold": {},
-            "compare_type": {},
-            "result_mapping": {},
             "ranges": {"type": "array"},
             "default_label": {"type": "string"},
         },
@@ -253,7 +227,7 @@ class CompareThresholdOperator(BaseOperator):
     default_config = {"result_mapping": {"true": "是", "false": "否"}}
 
     def execute(self, data, config, context: ExecutionContext):
-        source_ref = config.get("first_value") or config.get("field") or config.get("source")
+        source_ref = config.get("first_value")
         field_val = get_value(data, source_ref, context)
         if field_val is None:
             raise OperatorException(
@@ -269,7 +243,7 @@ class CompareThresholdOperator(BaseOperator):
                 out_list.append(
                     self.execute(
                         {"_v": v},
-                        {**config, "first_value": "_v", "field": None, "source": None},
+                        {**config, "first_value": "_v"},
                         context,
                     )
                 )

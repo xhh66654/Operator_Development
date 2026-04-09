@@ -14,7 +14,7 @@ except ImportError:
 from ...core import BaseOperator, ExecutionContext, OperatorException, OperatorRegistry
 from ...core.exceptions import ErrorCode
 from ...utils import extract_field_value
-from .._common import _ctx, get_value, normalize_config_source_field, rows_to_field_list_dict
+from .._common import _ctx, get_value, rows_to_field_list_dict
 
 
 def _to_list(raw_data: Any) -> List:
@@ -34,8 +34,8 @@ def _is_columns_dict(x: Any) -> bool:
 def _unwrap_column_bundle_to_columns_dict(raw_source: Any) -> Any:
     """
     兼容两种“列包”形态：
-    1) {field: [values...]}  （列字典）
-    2) [{field: [values...]}]（列包 list 包一层）
+    1) {field: [values...]}  （列字典；这里的 field 指“数据列名”，不是算子 config 的 field 键）
+    2) [{field: [values...]}]（列包 list 包一层；同上）
     返回列字典；若不是列包则返回 None。
     """
     if _is_columns_dict(raw_source):
@@ -151,20 +151,19 @@ def _is_blank_field(field_name: str) -> bool:
 
 @OperatorRegistry.register("filter_by_condition")
 class FilterByConditionOperator(BaseOperator):
-    """按条件过滤：支持记录列表（按字段）或单纯数组（按元素值）。数据来源统一为 source_field，兼容 field/list_field/source。"""
+    """按条件过滤：支持记录列表（按字段）或单纯数组（按元素值）。数据来源为 first_value；conditions 为 second_value。"""
     name = "filter_by_condition"
-    config_schema = {"type": "object", "properties": {"source_field": {}, "field": {}, "list_field": {}, "source": {},  "conditions": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "conditions": {}}}
     default_config = {"conditions": {}}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
-        merged = normalize_config_source_field(merged)
         if merged.get("second_value") not in (None, ""):
             merged["conditions"] = merged.get("second_value")
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        raw_source = extract_field_value(data, config.get("source_field"), _ctx(context))
+        raw_source = extract_field_value(data, config.get("first_value"), _ctx(context))
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
         input_is_columns = columns_dict is not None
         raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
@@ -247,23 +246,23 @@ def _normalize_field_name(name: str) -> str:
 
 @OperatorRegistry.register("select_fields")
 class SelectFieldsOperator(BaseOperator):
-    """保留指定字段算子；数据来源统一为 source_field，兼容 field/list_field/source。"""
+    """保留指定字段算子；数据来源为 first_value；字段列表由 second_value 提供。"""
     name = "select_fields"
-    config_schema = {"type": "object", "properties": {"source_field": {}, "field": {}, "list_field": {}, "source": {},  "fields": {"type": "array"}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}}}
+    default_config = {}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        merged = normalize_config_source_field(merged)
-        if merged.get("second_value") not in (None, ""):
-            merged["fields"] = merged.get("second_value")
-        return merged
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        raw_source = extract_field_value(data, config.get("source_field"), _ctx(context))
+        raw_source = extract_field_value(data, config.get("first_value"), _ctx(context))
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
         if columns_dict is not None:
-            fields = config.get("fields", [])
+            fields = (
+                get_value(data, config.get("second_value"), context)
+                if config.get("second_value") not in (None, "")
+                else []
+            )
             if not fields:
                 return [columns_dict]
             normalized = [_normalize_field_name(f) for f in fields]
@@ -275,7 +274,11 @@ class SelectFieldsOperator(BaseOperator):
             return [out_dict] if out_dict else [{}]
 
         raw_data = _to_list(raw_source)
-        fields = config.get("fields", [])
+        fields = (
+            get_value(data, config.get("second_value"), context)
+            if config.get("second_value") not in (None, "")
+            else []
+        )
         if not fields:
             return raw_data
         # 规范化字段名，便于匹配 CSV 列名（如 姓名 而不是 "姓名"）
@@ -308,24 +311,23 @@ class SelectFieldsOperator(BaseOperator):
 
 @OperatorRegistry.register("remove_duplicates")
 class RemoveDuplicatesOperator(BaseOperator):
-    """去重算子；数据来源统一为 source_field，兼容 field/list_field/source。"""
+    """去重算子；数据来源为 first_value；key_fields 为 second_value。"""
     name = "remove_duplicates"
-    config_schema = {"type": "object", "properties": {"source_field": {}, "field": {}, "list_field": {}, "source": {},  "key_fields": {"type": "array"}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "key_fields": {"type": "array"}}}
     default_config = {}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
-        merged = normalize_config_source_field(merged)
         if merged.get("second_value") not in (None, ""):
             merged["key_fields"] = merged.get("second_value")
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        raw_source = extract_field_value(data, config.get("source_field"), _ctx(context))
+        raw_source = extract_field_value(data, config.get("first_value"), _ctx(context))
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
         input_is_columns = columns_dict is not None
         raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
-        key_fields = config.get("key_fields") or config.get("fields")
+        key_fields = config.get("key_fields")
         seen = set()
         out = []
         for item in raw_data:
@@ -350,16 +352,15 @@ class RemoveDuplicatesOperator(BaseOperator):
 
 @OperatorRegistry.register("remove_nulls")
 class RemoveNullsOperator(BaseOperator):
-    """空值处理算子；数据来源统一为 source_field，兼容 field/list_field/source。"""
+    """空值处理算子；数据来源为 first_value；检查字段/策略/空值集合由 second/third/fourth_value 提供。"""
     name = "remove_nulls"
-    config_schema = {"type": "object", "properties": {"source_field": {}, "field": {}, "list_field": {}, "source": {},  "fields": {}, "strategy": {}, "fill_value": {}, "null_values": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "strategy": {}, "fill_value": {}, "null_values": {}}}
     default_config = {"strategy": "remove", "fill_value": 0, "null_values": [None, "", "null", "NULL", "N/A", "n/a"]}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
-        merged = normalize_config_source_field(merged)
         if merged.get("second_value") not in (None, ""):
-            merged["fields"] = merged.get("second_value")
+            merged["fields_to_check"] = merged.get("second_value")
         if merged.get("third_value") not in (None, ""):
             merged["strategy"] = merged.get("third_value")
         if merged.get("fourth_value") not in (None, ""):
@@ -367,11 +368,11 @@ class RemoveNullsOperator(BaseOperator):
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        raw_source = extract_field_value(data, config.get("source_field"), _ctx(context))
+        raw_source = get_value(data, config.get("first_value"), context)
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
         input_is_columns = columns_dict is not None
         raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
-        fields_to_check = config.get("fields")
+        fields_to_check = config.get("fields_to_check")
         strategy = config.get("strategy", "remove")
         fill_value = config.get("fill_value", 0)
         null_values = config.get("null_values", [None, "", "null", "NULL", "N/A", "n/a"])
@@ -428,14 +429,13 @@ class RemoveOutliersOperator(BaseOperator):
     """
     name = "remove_outliers"
     config_schema = {"type": "object", "properties": {
-        "source_field": {}, "field": {}, "list_field": {}, "source": {},
+        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {},
         "target_fields": {}, "method": {}, "threshold": {}, "manual_ranges": {}, "strategy": {}
     }}
     default_config = {"method": "iqr", "threshold": 1.5, "strategy": "remove"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
-        merged = normalize_config_source_field(merged)
         if merged.get("second_value") not in (None, ""):
             merged["target_fields"] = merged.get("second_value")
         if merged.get("third_value") not in (None, ""):
@@ -457,7 +457,7 @@ class RemoveOutliersOperator(BaseOperator):
             return mean_val - threshold * std_val, mean_val + threshold * std_val
 
     def execute(self, data, config, context: ExecutionContext):
-        raw_source = extract_field_value(data, config.get("source_field"), _ctx(context))
+        raw_source = extract_field_value(data, config.get("first_value"), _ctx(context))
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
         input_is_columns = columns_dict is not None
         raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
@@ -487,8 +487,6 @@ class RemoveOutliersOperator(BaseOperator):
 
 
         target_fields = list(config.get("target_fields") or [])
-        if not target_fields and config.get("field"):
-            target_fields = [config["field"]]
         if not target_fields:
             return _maybe_return_columns(input_is_columns, raw_data)
 
@@ -533,14 +531,13 @@ class RemoveOutliersOperator(BaseOperator):
 
 @OperatorRegistry.register("sort_data")
 class SortDataOperator(BaseOperator):
-    """排序算子；数据来源统一为 source_field，兼容 field/list_field/source。"""
+    """排序算子；数据来源为 first_value；sort_by/order/null_placement 分别来自 second/third/fourth_value。"""
     name = "sort_data"
-    config_schema = {"type": "object", "properties": {"source_field": {}, "field": {}, "list_field": {}, "source": {},  "sort_by": {}, "order": {}, "null_placement": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "sort_by": {}, "order": {}, "null_placement": {}}}
     default_config = {"order": "asc", "null_placement": "last"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
-        merged = normalize_config_source_field(merged)
         if merged.get("second_value") not in (None, ""):
             merged["sort_by"] = merged.get("second_value")
         if merged.get("third_value") not in (None, ""):
@@ -550,7 +547,7 @@ class SortDataOperator(BaseOperator):
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        raw_source = extract_field_value(data, config.get("source_field"), _ctx(context))
+        raw_source = extract_field_value(data, config.get("first_value"), _ctx(context))
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
         input_is_columns = columns_dict is not None
         raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
@@ -596,20 +593,19 @@ class SortDataOperator(BaseOperator):
 
 @OperatorRegistry.register("rename_fields")
 class RenameFieldsOperator(BaseOperator):
-    """字段重命名；数据来源统一为 source_field，兼容 field/list_field/source。"""
+    """字段重命名；数据来源为 first_value；mappings 为 second_value。"""
     name = "rename_fields"
-    config_schema = {"type": "object", "properties": {"source_field": {}, "field": {}, "list_field": {}, "source": {},  "mappings": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "mappings": {}}}
     default_config = {"mappings": {}}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
-        merged = normalize_config_source_field(merged)
         if merged.get("second_value") not in (None, ""):
             merged["mappings"] = merged.get("second_value")
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        raw_data = _to_list(extract_field_value(data, config.get("source_field"), _ctx(context)))
+        raw_data = _to_list(extract_field_value(data, config.get("first_value"), _ctx(context)))
         mappings = config.get("mappings", {})
         out = []
         for item in raw_data:
@@ -622,73 +618,179 @@ class RenameFieldsOperator(BaseOperator):
 
 @OperatorRegistry.register("merge_data")
 class MergeDataOperator(BaseOperator):
-    """多源合并"""
+    """多源合并（仅支持顺序槽位）"""
     name = "merge_data"
-    config_schema = {"type": "object", "properties": {"sources": {"type": "array"}, "merge_type": {}, "join_key": {}}}
-    default_config = {"sources": [], "merge_type": "concat"}
+    config_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["first_value"],
+        "properties": {"first_value": {}, "second_value": {}, "third_value": {}},
+    }
+    default_config = {"merge_type": "concat"}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
-        if merged.get("sources") in (None, "") and merged.get("first_value") not in (None, "") and merged.get("second_value") not in (None, ""):
-            merged["sources"] = [merged.get("first_value"), merged.get("second_value")]
-        if merged.get("merge_type") in (None, "") and merged.get("fourth_value") not in (None, ""):
-            mv = str(merged.get("fourth_value")).strip().lower()
-            # 文档里 inner/left/right/outer 统一映射到 join
-            merged["merge_type"] = "join" if mv in {"inner", "left", "right", "outer", "join"} else mv
-        if merged.get("join_key") in (None, "") and merged.get("third_value") not in (None, ""):
-            jk = merged.get("third_value")
-            if isinstance(jk, list) and jk:
-                merged["join_key"] = str(jk[0])
-            else:
-                merged["join_key"] = str(jk) if jk not in (None, "") else jk
+        # second_value / third_value 为显式顺序槽位输入，应覆盖默认值
+        if merged.get("second_value") not in (None, ""):
+            merged["merge_type"] = merged.get("second_value")
+        if merged.get("third_value") not in (None, ""):
+            merged["join_key"] = merged.get("third_value")
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        sources = config.get("sources", [])
-        merge_type = config.get("merge_type", "concat")
-        join_key = config.get("join_key")
-        ctx = _ctx(context)
+        sources_cfg = config.get("first_value")
+        if isinstance(sources_cfg, list):
+            # sources 本身就是列表字面量（最常见），不要走 get_value 的“列表合并”语义
+            sources_raw = list(sources_cfg)
+        else:
+            # 支持 sources 从 data/ctx 中取到一个列表（例如某一步计算得到的 sources 列表）
+            sources_raw = get_value(data, sources_cfg, context)
+        if sources_raw is None:
+            raise OperatorException(
+                "merge_data 缺少 sources：first_value 必须提供来源列表（字段名、${step_key} 或字面量列表）",
+                code=ErrorCode.CONFIG_MISSING,
+                operator=self.name,
+                config=config,
+            )
+        if not isinstance(sources_raw, list) or len(sources_raw) == 0:
+            raise OperatorException(
+                "merge_data 的 first_value 必须为非空列表（sources）",
+                code=ErrorCode.TYPE_ERROR,
+                operator=self.name,
+                config=config,
+            )
+
+        sources = sources_raw
+        merge_type_raw = config.get("merge_type", "concat")
+        merge_type = str(merge_type_raw).strip().lower() if merge_type_raw not in (None, "") else "concat"
+
         if merge_type == "concat":
             out = []
-            for src in sources:
-                v = extract_field_value(data, src, ctx)
+            for i, src in enumerate(sources):
+                v = get_value(data, src, context)
+                if v is None:
+                    raise OperatorException(
+                        f"merge_data concat 第{i + 1}个 source 取不到值: {src!r}",
+                        code=ErrorCode.DATA_NOT_FOUND,
+                        operator=self.name,
+                        config=config,
+                    )
                 if isinstance(v, list):
                     out.extend(v)
-                elif v is not None:
+                else:
                     out.append(v)
             return out
-        if merge_type == "join" and join_key and len(sources) >= 2:
-            base = _to_list(extract_field_value(data, sources[0], ctx))
-            for src in sources[1:]:
-                join_data = _to_list(extract_field_value(data, src, ctx))
-                index = {it[join_key]: it for it in join_data if isinstance(it, dict) and join_key in it}
-                merged = []
+
+        if merge_type == "join":
+            if len(sources) < 2:
+                raise OperatorException(
+                    "merge_data join 至少需要 2 个 source",
+                    code=ErrorCode.CONFIG_MISSING,
+                    operator=self.name,
+                    config=config,
+                )
+            join_key_raw = config.get("join_key")
+            join_key = str(join_key_raw).strip() if join_key_raw not in (None, "") else ""
+            if not join_key:
+                raise OperatorException(
+                    "merge_data join 缺少 join_key：third_value 必须提供 join_key",
+                    code=ErrorCode.CONFIG_MISSING,
+                    operator=self.name,
+                    config=config,
+                )
+
+            base0 = get_value(data, sources[0], context)
+            if base0 is None:
+                raise OperatorException(
+                    f"merge_data join 第1个 source 取不到值: {sources[0]!r}",
+                    code=ErrorCode.DATA_NOT_FOUND,
+                    operator=self.name,
+                    config=config,
+                )
+            base = _to_list(base0)
+            # 为了保证输出可被 TableValue 表示，join 后需要对齐所有行的字段集合（缺失字段补 None）。
+            union_keys = set()
+            for r in base:
+                if isinstance(r, dict):
+                    union_keys.update(r.keys())
+
+            for i, src in enumerate(sources[1:], start=2):
+                join_raw = get_value(data, src, context)
+                if join_raw is None:
+                    raise OperatorException(
+                        f"merge_data join 第{i}个 source 取不到值: {src!r}",
+                        code=ErrorCode.DATA_NOT_FOUND,
+                        operator=self.name,
+                        config=config,
+                    )
+                join_data = _to_list(join_raw)
+
+                index = {}
+                join_keys = set()
+                for it in join_data:
+                    if not isinstance(it, dict) or join_key not in it:
+                        continue
+                    join_keys.update(it.keys())
+                    k = it.get(join_key)
+                    try:
+                        hash(k)
+                    except Exception as e:
+                        raise OperatorException(
+                            f"merge_data join 的 join_key 值不可作为 key（不可哈希）: {k!r}",
+                            code=ErrorCode.TYPE_ERROR,
+                            operator=self.name,
+                            config=config,
+                            cause=e,
+                        )
+                    index[k] = it
+
+                merged_rows = []
                 for b in base:
-                    if isinstance(b, dict) and join_key in b and b[join_key] in index:
-                        merged.append({**b, **index[b[join_key]]})
+                    if isinstance(b, dict) and join_key in b and b.get(join_key) in index:
+                        merged_rows.append({**b, **index[b.get(join_key)]})
                     else:
-                        merged.append(b)
-                base = merged
+                        merged_rows.append(b)
+                base = merged_rows
+                union_keys.update(join_keys)
+
+            # 补齐缺失字段，避免 TableValue 校验失败
+            if union_keys:
+                normalized = []
+                for r in base:
+                    if not isinstance(r, dict):
+                        normalized.append(r)
+                        continue
+                    rr = dict(r)
+                    for k in union_keys:
+                        if k not in rr:
+                            rr[k] = None
+                    normalized.append(rr)
+                base = normalized
             return base
-        return []
+
+        raise OperatorException(
+            f"merge_data 不支持的 merge_type: {merge_type!r}（仅支持 concat/join）",
+            code=ErrorCode.CONFIG_INVALID,
+            operator=self.name,
+            config=config,
+        )
 
 
 @OperatorRegistry.register("flatten_data")
 class FlattenDataOperator(BaseOperator):
-    """嵌套列表打平；数据来源统一为 source_field，兼容 field/list_field/source。举例：[[1,2],[3,4]] → [1,2,3,4]"""
+    """嵌套列表打平；数据来源为 first_value；nested_field 为 second_value。举例：[[1,2],[3,4]] → [1,2,3,4]"""
     name = "flatten_data"
-    config_schema = {"type": "object", "properties": {"source_field": {}, "field": {}, "list_field": {}, "source": {},  "nested_field": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "nested_field": {}}}
     default_config = {}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
-        merged = normalize_config_source_field(merged)
         if merged.get("second_value") not in (None, ""):
             merged["nested_field"] = merged.get("second_value")
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        raw_data = _to_list(extract_field_value(data, config.get("source_field"), _ctx(context)))
+        raw_data = _to_list(get_value(data, config.get("first_value"), context))
         nested_field = config.get("nested_field")
         out = []
         for item in raw_data:

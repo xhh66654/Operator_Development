@@ -48,8 +48,8 @@ class ESExtractOperator(BaseOperator):
 
     def _resolve_config(self, config):
         c = normalize_config_input(super()._resolve_config(config))
-        # 兼容顺序参数（提取类算子不会走 BaseOperator 的顺序参数映射）
-        # first_value -> index, second_value -> table(fields), third_value -> query
+        # 提取类算子使用具名参数（index/table/query），同时支持顺序槽位：
+        # first_value -> index, second_value -> table(字段列表), third_value -> query
         if c.get("index") in (None, "") and c.get("first_value") not in (None, ""):
             c["index"] = c.get("first_value")
         if c.get("table") in (None, "") and c.get("second_value") not in (None, ""):

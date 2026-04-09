@@ -1,8 +1,4 @@
 """Elasticsearch：仅连接，客户端写入上下文供提取算子复用。
-
-服务模式下：单次计算开始时若已配置 ES 环境变量且编排中含 ``es_extract``，
-会预先调用 ``warm_es_client_for_calculation``，使客户端在本次 ``ExecutionContext``
-生命周期内保持可用，直至 ``release_pipeline_resources`` / ``dispose``。
 """
 import os
 from typing import Any, Dict, List, Optional

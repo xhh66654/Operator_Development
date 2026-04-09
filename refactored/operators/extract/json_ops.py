@@ -45,14 +45,12 @@ class JsonExtractOperator(BaseOperator):
     config_schema = {
         "type": "object",
         "properties": {
-            "input": {},
-            "source": {},
-            "field": {"type": "string"},
-            "fields": {"type": "array"},
-            "nested": {"type": "string"},
-            "filter": {"type": "object"},
-            "default": {},
-            "mode": {"type": "string"},
+            "first_value": {},
+            "second_value": {},
+            "third_value": {},
+            "fourth_value": {},
+            "fifth_value": {},
+            "sixth_value": {},
         },
     }
     default_config: Dict[str, Any] = {}
@@ -60,24 +58,7 @@ class JsonExtractOperator(BaseOperator):
     output_spec = {"type": "table"}
 
     def _resolve_config(self, config):
-        c = normalize_config_input(super()._resolve_config(config))
-        if c.get("source") in (None, "") and c.get("input") not in (None, ""):
-            c["source"] = c["input"]
-        # 兼容顺序参数（文档使用 first_value/second_value/third_value）
-        # first_value -> source
-        # second_value -> fields（数组）或 field（字符串）
-        # third_value -> nested
-        if c.get("source") in (None, "") and c.get("first_value") not in (None, ""):
-            c["source"] = c.get("first_value")
-        if c.get("fields") in (None, "") and c.get("field") in (None, "") and c.get("second_value") not in (None, ""):
-            sv = c.get("second_value")
-            if isinstance(sv, list):
-                c["fields"] = sv
-            elif isinstance(sv, str) and sv.strip():
-                c["field"] = sv.strip()
-        if c.get("nested") in (None, "") and c.get("third_value") not in (None, ""):
-            c["nested"] = c.get("third_value")
-        return c
+        return normalize_config_input(super()._resolve_config(config))
 
     def execute(
         self,
@@ -85,24 +66,38 @@ class JsonExtractOperator(BaseOperator):
         config: Dict[str, Any],
         context: ExecutionContext,
     ) -> Any:
-        source_cfg = config.get("source")
+        source_cfg = config.get("first_value")
         if source_cfg is None:
             raise OperatorException(
-                "json_extract 缺少数据来源: source（可为字段名或 ${step_key}）",
+                "json_extract 缺少数据来源: first_value（可为字段名或 ${step_key}）",
                 code=ErrorCode.CONFIG_MISSING,
                 operator=self.name,
                 config=config,
             )
 
-        raw = get_value(data, source_cfg, context)
+        if isinstance(source_cfg, (dict, list)):
+            raw = source_cfg
+        else:
+            raw = get_value(data, source_cfg, context)
         if raw is None:
-            return config.get("default")
+            raise OperatorException(
+                "json_extract 数据来源为空或未找到: first_value",
+                code=ErrorCode.DATA_NOT_FOUND,
+                operator=self.name,
+                config=config,
+            )
+
+        selector = config.get("second_value")
+        field_name = None
+        fields = None
+        if isinstance(selector, list):
+            fields = selector
+        elif isinstance(selector, str) and selector.strip():
+            field_name = selector.strip()
 
         if _is_column_bundle(raw):
             d0 = raw[0]
-            field_name = config.get("field")
-            fields = config.get("fields")
-            default = config.get("default")
+            default = config.get("fifth_value")
             if isinstance(fields, list) and fields:
                 keys = [str(k).strip() for k in fields if str(k).strip()]
                 return [{k: d0.get(k, default) for k in keys}] if keys else [{}]
@@ -110,12 +105,10 @@ class JsonExtractOperator(BaseOperator):
                 return [{str(field_name): d0.get(field_name, default)}]
             return raw
 
-        field_name = config.get("field")
-        fields = config.get("fields")
-        nested_path = config.get("nested") or ""
-        filter_cond = config.get("filter") if isinstance(config.get("filter"), dict) else {}
-        default = config.get("default")
-        mode = (config.get("mode") or "columns").lower()
+        nested_path = str(config.get("third_value") or "").strip()
+        filter_cond = config.get("fourth_value") if isinstance(config.get("fourth_value"), dict) else {}
+        default = config.get("fifth_value")
+        mode = str(config.get("sixth_value") or "columns").lower()
 
         def _pick(item: Dict, key: str):
             if isinstance(key, str) and "." in key:
@@ -180,13 +173,13 @@ class JsonExtractOperator(BaseOperator):
             if nested_path:
                 v = _get_nested(raw, nested_path, default)
                 if v is None:
-                    return config.get("default")
+                    return default
                 vl = v if isinstance(v, list) else [v]
                 return [{nested_path.split(".")[-1] or "value": vl}]
             if field_name:
                 v = raw.get(field_name, default)
                 if v is None:
-                    return config.get("default")
+                    return default
                 vl = v if isinstance(v, list) else [v]
                 return [{str(field_name): vl}]
             if raw and all(isinstance(v, list) for v in raw.values()):

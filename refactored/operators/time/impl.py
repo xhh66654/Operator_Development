@@ -119,17 +119,11 @@ class TimeAddOperator(BaseOperator):
     def _resolve_config(self, config):
         c = super()._resolve_config(config)
         if c.get("base_time") in (None, ""):
-            for k in ("first_value", "value", "input", "primary"):
-                v = c.get(k)
-                if v not in (None, ""):
-                    c["base_time"] = v
-                    break
+            if c.get("first_value") not in (None, ""):
+                c["base_time"] = c.get("first_value")
         if c.get("duration_seconds") in (None, ""):
-            for k in ("second_value", "secondary"):
-                v = c.get(k)
-                if v not in (None, ""):
-                    c["duration_seconds"] = v
-                    break
+            if c.get("second_value") not in (None, ""):
+                c["duration_seconds"] = c.get("second_value")
         if c.get("duration") in (None, "") and c.get("third_value") not in (None, ""):
             c["duration"] = c.get("third_value")
         return c
@@ -203,17 +197,11 @@ class TimeSubtractOperator(BaseOperator):
     def _resolve_config(self, config):
         c = super()._resolve_config(config)
         if c.get("end_time") in (None, ""):
-            for k in ("first_value", "value", "input", "primary"):
-                v = c.get(k)
-                if v not in (None, ""):
-                    c["end_time"] = v
-                    break
+            if c.get("first_value") not in (None, ""):
+                c["end_time"] = c.get("first_value")
         if c.get("start_time") in (None, ""):
-            for k in ("second_value", "secondary"):
-                v = c.get(k)
-                if v not in (None, ""):
-                    c["start_time"] = v
-                    break
+            if c.get("second_value") not in (None, ""):
+                c["start_time"] = c.get("second_value")
         if c.get("base_time") in (None, ""):
             for k in ("third_value",):
                 v = c.get(k)
@@ -289,24 +277,17 @@ class TimeSubtractOperator(BaseOperator):
 class AverageTimeOperator(BaseOperator):
     """
     平均时间：对一组时间取平均，返回 ISO 时间字符串
-    config: field（存时间列表的字段名或 "${step_key}"）
+    输入：first_value（存时间列表的字段名或 "${step_key}"）
     """
     name = "average_time"
-    config_schema = {"type": "object", "properties": {"field": {}, "source": {}, "first_value": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}}}
     default_config = {}
 
     def _resolve_config(self, config):
-        c = super()._resolve_config(config)
-        if c.get("field") in (None, "") and c.get("source") in (None, ""):
-            for k in ("first_value", "value", "input", "primary"):
-                v = c.get(k)
-                if v not in (None, ""):
-                    c["field"] = v
-                    break
-        return c
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        ref = config.get("field") or config.get("source") or config.get("first_value")
+        ref = config.get("first_value")
         raw = _get_time_ref(data, ref, context)
         if raw is None:
             raise OperatorException(

@@ -2,7 +2,7 @@
 算子公共：字段取值、数值转换、精度常量、config 规范化、标点标准化。
 
 统一 config 规范（与接口/前端约定一致）：
-- 数据来源（从 ES/表/上一步取）：source / source_field（单源）、operands（多源列表）、primary+secondary（二元）。
+- 输入数据来源：统一使用顺序参数 first_value/second_value/third_value/...（可为字段名或 ${step_key} 引用）。
 - 接口字段名指定取数位置，get_value(data, ref, context) 解析：record 中的字段名、${step_key}、字面量。
 - 前端直接传的配置（如权重、阈值）：weights、threshold、ranges、decimal_places 等，可为字面量或数据源引用。
 """
@@ -55,42 +55,6 @@ def normalize_config_punct(config: Any) -> Any:
     return config
 
 
-def normalize_config_to_fields(
-    config: Dict[str, Any],
-    single_key: str = "field",
-    multi_key: str = "fields",
-    operands_key: str = "operands",
-) -> Dict[str, Any]:
-    """
-    将「单字段/操作数」配置统一为「多字段」形态，便于算子内部只读 multi_key。
-    兼容：operands（统一 key）-> fields；field/fields 原有逻辑不变。
-    不修改原 config，返回新 dict。
-    """
-    if not config:
-        return dict(config)
-    out = normalize_config_input(dict(config))
-    # 统一规范：inputs 对应 fields，input 对应 field
-    if out.get(multi_key) in (None, "") and out.get("inputs") not in (None, ""):
-        iv = out.get("inputs")
-        out[multi_key] = iv if isinstance(iv, list) else [iv]
-    if out.get(single_key) in (None, "") and out.get("input") not in (None, ""):
-        out[single_key] = out.get("input")
-    if out.get(multi_key) and isinstance(out.get(multi_key), list) and len(out.get(multi_key, [])) > 0:
-        return out
-    # 统一 key：operands 视为与 fields 等价
-    if out.get(operands_key) is not None:
-        op_val = out[operands_key]
-        if isinstance(op_val, list):
-            out = {**out, multi_key: op_val}
-        else:
-            out = {**out, multi_key: [op_val]}
-        return out
-    single = out.get(single_key)
-    if single is not None and single != "":
-        out = {**out, multi_key: [single] if not isinstance(single, list) else single}
-    return out
-
-
 def normalize_primary_secondary(
     config: Dict[str, Any],
     primary_key: str = "primary",
@@ -99,8 +63,11 @@ def normalize_primary_secondary(
     legacy_secondary: str = "subtrahends",
 ) -> Dict[str, Any]:
     """
-    二元运算统一 key：若前端传 primary/secondary，则填入 legacy_primary/legacy_secondary，
-    算子内部仍读 minuend/subtrahends 或 dividend/divisors。
+    历史兼容函数：在两组“语义等价”的键之间做互相回填。
+
+    说明：
+    - 本项目的**输入取值**已统一为顺序槽位 first_value/second_value/...；该函数仅用于存量代码在内部仍使用
+      primary/secondary（或其它 legacy_* 命名）时的过渡兼容，不建议在新算子中继续扩散使用。
     """
     if not config:
         return dict(config)
@@ -116,31 +83,6 @@ def normalize_primary_secondary(
     return out
 
 
-def normalize_config_source_field(
-    config: Dict[str, Any],
-    canonical_key: str = "source_field",
-    legacy_keys: Tuple[str, ...] = ("field", "list_field", "source"),
-) -> Dict[str, Any]:
-    """
-    将「数据来源」统一为 canonical_key（默认 source_field）。
-    兼容：若已有 canonical_key 则不动；否则用第一个在 config 中存在的 legacy_key 填入。
-    不修改原 config，返回新 dict。
-    """
-    if not config:
-        return dict(config)
-    out = dict(config)
-    if out.get(canonical_key) not in (None, ""):
-        return out
-    # 统一顺序参数：first_value 作为单一数据来源
-    if out.get("first_value") not in (None, ""):
-        return {**out, canonical_key: out.get("first_value")}
-    for k in legacy_keys:
-        if out.get(k) not in (None, ""):
-            out = {**out, canonical_key: out[k]}
-            break
-    return out
-
-
 def normalize_config_input(
     config: Dict[str, Any],
     single_key: str = "input",
@@ -149,45 +91,10 @@ def normalize_config_input(
     legacy_multi_keys: Tuple[str, ...] = ("fields", "operands"),
 ) -> Dict[str, Any]:
     """
-    参数规范统一：input / inputs
-    - legacy single -> input
-    - legacy multi  -> inputs
-    同时回填旧键，保证旧算子逻辑继续可用。
+    历史兼容函数：已不再做旧键映射/回填，保留函数名仅为避免调用方报错。
+    当前只返回 config 的浅拷贝。
     """
-    if not config:
-        return dict(config)
-    out = dict(config)
-    warnings: List[str] = list(out.get(_DEPRECATED_PARAM_WARNINGS_KEY) or [])
-
-    # normalize inputs
-    if out.get(multi_key) in (None, ""):
-        for k in legacy_multi_keys:
-            if out.get(k) not in (None, ""):
-                v = out[k]
-                out[multi_key] = v if isinstance(v, list) else [v]
-                warnings.append(f"{k} is deprecated; use {multi_key}")
-                break
-    # normalize input
-    if out.get(single_key) in (None, ""):
-        for k in legacy_single_keys:
-            if out.get(k) not in (None, ""):
-                out[single_key] = out[k]
-                warnings.append(f"{k} is deprecated; use {single_key}")
-                break
-
-    # backfill legacy for compatibility
-    if out.get(single_key) not in (None, ""):
-        for k in legacy_single_keys:
-            if out.get(k) in (None, ""):
-                out[k] = out[single_key]
-    if out.get(multi_key) not in (None, ""):
-        for k in legacy_multi_keys:
-            if out.get(k) in (None, ""):
-                out[k] = out[multi_key]
-
-    if warnings:
-        out[_DEPRECATED_PARAM_WARNINGS_KEY] = sorted(set(warnings))
-    return out
+    return dict(config) if isinstance(config, dict) else {"value": config}
 
 
 def _ctx(context) -> Dict[str, Any]:
@@ -233,6 +140,12 @@ def get_value(data: Dict, field_or_expr: Any, context) -> Any:
         for item in field_or_expr:
             if isinstance(item, str):
                 v = extract_field_value(data, item, _ctx(context))
+                # 严格模式：上下文引用取不到值直接报错（避免静默丢失导致算子“看起来还能算”）。
+                if v is None and _looks_like_context_ref(item):
+                    raise OperatorException(
+                        f"上下文引用未取到值: {item}",
+                        code=ErrorCode.DATA_NOT_FOUND,
+                    )
                 # data 中无此字段且非上下文引用时，视为字面量（如集合算子的 ["苹果","香蕉"]）
                 if v is None and not _looks_like_context_ref(item):
                     v = item
@@ -245,6 +158,14 @@ def get_value(data: Dict, field_or_expr: Any, context) -> Any:
             else:
                 merged.append(v)
         return merged
+    if isinstance(field_or_expr, str):
+        v = extract_field_value(data, field_or_expr, _ctx(context))
+        if v is None and _looks_like_context_ref(field_or_expr):
+            raise OperatorException(
+                f"上下文引用未取到值: {field_or_expr}",
+                code=ErrorCode.DATA_NOT_FOUND,
+            )
+        return v
     return extract_field_value(data, field_or_expr, _ctx(context))
 
 

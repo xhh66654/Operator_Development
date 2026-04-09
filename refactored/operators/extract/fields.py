@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...utils import extract_field_value
-from .._common import _ctx, normalize_config_input, normalize_config_source_field, rows_to_field_list_dict
+from .._common import _ctx, normalize_config_input, rows_to_field_list_dict
 
 
 def clean_nan_records(records: List[Dict]) -> List[Dict]:
@@ -18,23 +18,18 @@ def clean_nan_records(records: List[Dict]) -> List[Dict]:
 
 @OperatorRegistry.register("extract_only")
 class ExtractOnlyOperator(BaseOperator):
-    """仅提取字段；数据来源统一为 source / source_field / field。"""
+    """仅提取字段；数据来源使用顺序参数 first_value。"""
     name = "extract_only"
-    config_schema = {"type": "object", "properties": {"input": {}, "source": {}, "source_field": {}, "field": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}}}
     default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "table"}
 
     def _resolve_config(self, config):
-        c = normalize_config_input(super()._resolve_config(config))
-        if c.get("field") in (None, "") and c.get("first_value") not in (None, ""):
-            c["field"] = c.get("first_value")
-        return normalize_config_source_field(
-            c, canonical_key="field", legacy_keys=("input", "source_field", "source")
-        )
+        return normalize_config_input(super()._resolve_config(config))
 
     def execute(self, data, config, context: ExecutionContext):
-        field = config.get("field") or config.get("source") or config.get("source_field")
+        field = config.get("first_value")
         if field is None:
             return None
         raw = extract_field_value(data, field, _ctx(context))

@@ -68,6 +68,30 @@ def _run_job(job_id: str, body: Dict[str, Any]) -> None:
         "runId": body.get("runId") ,
         "systemId": body.get("systemId"),
     }
+
+    def _compact_error_message(msg: str) -> str:
+        """
+        将 tree_calculation 附加的长 suffix 收敛为：
+          "{step_id} {reason}"
+        """
+        if not msg:
+            return "unknown error"
+        core = msg
+        # 去掉 tree_calculation 的元信息后缀（形如 " [taskId=... step_id=...]"）
+        cut = core.find(" [taskId=")
+        if cut >= 0:
+            core = core[:cut].strip()
+        # 从后缀中解析 step_id（如果存在）
+        step_id = ""
+        try:
+            import re
+
+            m = re.search(r"step_id=([^\\s\\]]+)", msg)
+            if m:
+                step_id = (m.group(1) or "").strip()
+        except Exception:
+            step_id = ""
+        return f"{step_id} {core}".strip() if step_id else core.strip()
     try:
         with _jobs_lock:
             if job_id in _jobs:
@@ -90,13 +114,23 @@ def _run_job(job_id: str, body: Dict[str, Any]) -> None:
         result = calculate_indicator(body)
         ok = bool(result.get("success", True))
         tid, rid, sid = response_meta_triple(body)
-        callback_payload: Dict[str, Any] = {
-            "success": ok,
-            "taskId": result.get("taskId", tid),
-            "runId": result.get("runId", rid),
-            "systemId": result.get("systemId", sid),
-            "reasoningDataList": result.get("reasoningDataList") or [],
-        }
+        if ok:
+            callback_payload: Dict[str, Any] = {
+                "success": True,
+                "taskId": result.get("taskId", tid),
+                "runId": result.get("runId", rid),
+                "systemId": result.get("systemId", sid),
+                "reasoningDataList": result.get("reasoningDataList") or [],
+            }
+        else:
+            # 失败：按你要求回调精简错误结构（不改变 /calculate 的 ack）
+            callback_payload = {
+                "success": False,
+                "taskId": result.get("taskId", tid),
+                "runId": result.get("runId", rid),
+                "systemId": result.get("systemId", sid),
+                "message": _compact_error_message(str(result.get("message") or "")),
+            }
         logger.info(
             "异步任务完成 job_id=%s taskId=%s runId=%s success=%s nodes=%s",
             job_id,

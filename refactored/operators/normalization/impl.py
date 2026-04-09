@@ -11,7 +11,7 @@ from typing import Any
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...utils import safe_convert_to_number
-from .._common import get_value, normalize_config_to_fields, to_number
+from .._common import get_value, to_number
 from ..statistics.stats import _collect_values
 
 
@@ -23,12 +23,11 @@ class NormalizeOperator(BaseOperator):
     输入：数值列表；输出：归一化后的数值列表。
     """
     name = "normalize"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}}}
+    default_config = {}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -47,12 +46,11 @@ class StandardizeOperator(BaseOperator):
     输入：数值列表；输出：z 分数列表（均值≈0，标准差≈1）。
     """
     name = "standardize"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}}}
+    default_config = {}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         values = _collect_values(data, config, context)
@@ -73,12 +71,11 @@ class ZScoreOperator(BaseOperator):
     等同于 standardize，返回同样的 z 分数列表。
     """
     name = "z_score"
-    config_schema = {"type": "object", "properties": {"operands": {"type": "array"}, "fields": {"type": "array"}, "field": {}}}
-    default_config = {"fields": []}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}}}
+    default_config = {}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        return normalize_config_to_fields(merged)
+        return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
         return StandardizeOperator().execute(data, config, context)
@@ -93,25 +90,19 @@ class MinMaxNormalizeOperator(BaseOperator):
     """
     name = "min_max_normalize"
     config_schema = {"type": "object", "properties": {
-        "operands": {"type": "array"}, "fields": {"type": "array"}, "field": {},
         "min_val": {}, "max_val": {},
         "first_value": {}, "second_value": {}, "third_value": {},
     }}
-    default_config = {"fields": []}
+    default_config = {}
 
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
-        merged = normalize_config_to_fields(merged)
         if merged.get("min_val") in (None, "") and merged.get("second_value") not in (None, ""):
             merged = dict(merged)
             merged["min_val"] = merged.get("second_value")
         if merged.get("max_val") in (None, "") and merged.get("third_value") not in (None, ""):
             merged = dict(merged)
             merged["max_val"] = merged.get("third_value")
-        # second_value/third_value 只作上下界，不能和 first_value 一起进入 fields 被当成样本
-        if merged.get("first_value") not in (None, ""):
-            merged = dict(merged)
-            merged["fields"] = [merged["first_value"]]
         return merged
 
     def execute(self, data, config, context: ExecutionContext):

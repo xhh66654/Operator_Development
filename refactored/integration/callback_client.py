@@ -33,7 +33,25 @@ def post_json(
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 resp.read()
             return True
-        except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as e:
+        except urllib.error.HTTPError as e:
+            last_err = e
+            # HTTPError 也属于可读出 status code 的响应
+            try:
+                body = e.read()
+                body_preview = body[:200].decode("utf-8", errors="replace") if body else ""
+            except Exception:
+                body_preview = ""
+            logger.warning(
+                "回调失败 (%s/%s) %s: http_status=%s reason=%s body=%s",
+                attempt + 1,
+                retries,
+                url,
+                getattr(e, "code", None),
+                getattr(e, "reason", None),
+                body_preview,
+            )
+            time.sleep(min(2**attempt, 30))
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
             last_err = e
             logger.warning("回调失败 (%s/%s) %s: %s", attempt + 1, retries, url, e)
             time.sleep(min(2**attempt, 30))

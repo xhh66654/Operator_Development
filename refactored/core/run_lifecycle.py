@@ -3,8 +3,6 @@
 业务约定：
 - 同一时刻同一 ``runId`` 只允许一个请求在执行；重复请求不参与计算。
 - 无 ``runId`` 的旧式请求跳过去重，保持兼容。
-- 运行结束后由调用方 ``release_run`` 释放占位；流水线内上下文由
-  ``ExecutionContext.dispose()`` 另行清空。
 """
 from __future__ import annotations
 

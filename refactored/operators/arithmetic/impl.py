@@ -18,7 +18,6 @@ from .._common import (
     get_value,
     to_number,
     to_number_or_none,
-    normalize_config_to_fields,
     normalize_primary_secondary,
 )
 
@@ -273,12 +272,10 @@ class AddOperator(BaseOperator):
     result = sum(all_operands)
     
     配置参数：
-    - fields (array): 加数字段列表，每个可以是：
-      * 接口字段名: "field1"
+    - first_value/second_value/third_value...：按顺序提供加数，每项可以是：
+      * 接口字段名: "price"
       * 上步骤引用: "${step_key}"
       * 数值: 100
-    - operands (array): 同fields，备选参数
-    - field (any): 单个字段时使用
     
     输入数据格式：
     base_data: {
@@ -291,7 +288,9 @@ class AddOperator(BaseOperator):
     {
         "operator": "add",
         "config": {
-            "fields": ["price", "tax", "fee"]
+            "first_value": "price",
+            "second_value": "tax",
+            "third_value": "fee"
         }
     }
     
@@ -504,9 +503,7 @@ class MultiplyOperator(BaseOperator):
     result = product(all_operands)
     
     配置参数：
-    - fields (array): 乘数字段列表
-    - operands (array): 同fields，备选参数
-    - field (any): 单个字段时使用
+    - first_value/second_value/third_value...：按顺序提供乘数，每项可以是字段名、${step_key} 或数值
     
     输入数据格式：
     base_data: {
@@ -519,7 +516,9 @@ class MultiplyOperator(BaseOperator):
     {
         "operator": "multiply",
         "config": {
-            "fields": ["quantity", "unit_price", "quantity_weight"]
+            "first_value": "quantity",
+            "second_value": "unit_price",
+            "third_value": "quantity_weight"
         }
     }
     
@@ -614,13 +613,11 @@ class DivideOperator(BaseOperator):
     例: 1/3 = 0.3333333333333333 (完整精度)
     
     配置参数：
-    - dividend (required): 被除数，可以是：
+    - first_value (required): 被除数，可以是：
       * 接口字段名: "total"
       * 上步骤引用: "${step_key}"
       * 数值: 100
-    - divisors (array): 除数数组，每个元素同dividend格式
-    - divisor (any): 单个除数（兼容旧格式，自动转为divisors）
-    - primary/secondary: 备选参数名
+    - second_value: 除数（标量）或除数数组（list）
     
     输入数据格式：
     base_data: {
@@ -633,8 +630,8 @@ class DivideOperator(BaseOperator):
     {
         "operator": "divide",
         "config": {
-            "dividend": "total_score",
-            "divisors": ["scale1", "scale2"]
+            "first_value": "total_score",
+            "second_value": ["scale1", "scale2"]
         }
     }
     
@@ -653,7 +650,7 @@ class DivideOperator(BaseOperator):
     
     异常处理：
     - 除数为0时抛出错误
-    - 必须同时提供dividend和divisors
+    - 必须提供 first_value 与 second_value
     """
     name = "divide"
     config_schema = {
@@ -908,21 +905,17 @@ class AbsoluteOperator(BaseOperator):
     name = "absolute_value"
     config_schema = {
         "type": "object",
-        "properties": {
-            "operands": {"type": "array"},
-            "fields": {"type": "array"},
-            "field": {},
-            "inputs": {"type": "array"},
-            "input": {},
-        },
+        "additionalProperties": False,
+        "required": ["first_value"],
+        "properties": _seq_config_properties(),
     }
-    default_config = {"fields": []}
+    default_config = {}
 
     def _resolve_config(self, config):
-        return normalize_config_to_fields(super()._resolve_config(config))
+        return super()._resolve_config(config)
 
     def execute(self, data: Dict[str, Any], config: Dict[str, Any], context: ExecutionContext) -> Any:
-        fields = config.get("fields", [])
+        fields = [config.get(k) for k in ("first_value", "second_value", "third_value", "fourth_value", "fifth_value") if config.get(k) not in (None, "")]
         if not fields:
             raise OperatorException(
                 "请指定至少一个值,进行绝对值转换",
@@ -1642,7 +1635,6 @@ class ProportionByCountOperator(BaseOperator):
     name = "proportion_by_count"
     config_schema = {
         "type": "object",
-        # 仅使用 first_value/second_value；允许多余键通过校验（执行时忽略）
         "additionalProperties": True,
         "required": ["first_value", "second_value"],
         "properties": {"first_value": {}, "second_value": {}},
@@ -1670,15 +1662,18 @@ class MatrixMultiplyOperator(BaseOperator):
     name = "matrix_multiply"
     config_schema = {
         "type": "object",
-        "properties": {"matrix1": {}, "matrix2": {}, "scalar": {}, "mode": {}, "input": {}, "inputs": {"type": "array"}},
+        "additionalProperties": False,
+        "required": ["first_value"],
+        "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "mode": {}},
     }
     default_config = {}
     output_spec = {"type": "list"}
 
     def execute(self, data, config, context: ExecutionContext):
-        m1_raw = get_value(data, config.get("matrix1"), context)
-        m2_field = config.get("matrix2")
-        scalar_raw = config.get("scalar")
+        # first_value -> matrix1, second_value -> matrix2(optional), third_value -> scalar(optional)
+        m1_raw = get_value(data, config.get("first_value"), context)
+        m2_field = config.get("second_value")
+        scalar_raw = config.get("third_value")
 
         if m2_field:
             m2 = get_value(data, m2_field, context)
@@ -1702,7 +1697,7 @@ class MatrixMultiplyOperator(BaseOperator):
             result = self._matrix_times_scalar(m1_raw, float(scalar))
         else:
             raise OperatorException(
-                "需提供 matrix2 或 scalar",
+                "需提供 second_value（matrix2）或 third_value（scalar）",
                 code=ErrorCode.CONFIG_MISSING,
                 operator=self.name,
                 config=config,
@@ -1754,7 +1749,7 @@ class CosineSimilarityOperator(BaseOperator):
     配置参数：
     - vectors (array): 向量列表（推荐）
       每个元素是数值列表：[1.0, 2.0, 3.0]
-    - vector1, vector2: 两个向量（兼容旧格式）
+    - first_value, second_value: 两个向量（字段名、${step_key} 或字面量）
     
     输入数据格式：
     base_data: {
@@ -1792,14 +1787,11 @@ class CosineSimilarityOperator(BaseOperator):
     name = "cosine_similarity"
     config_schema = {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
-            "vector1": {},
-            "vector2": {},
             "vectors": {"type": "array"},
             "first_value": {},
             "second_value": {},
-            "input": {},
-            "inputs": {"type": "array"},
         },
     }
     default_config = {}
@@ -1808,17 +1800,6 @@ class CosineSimilarityOperator(BaseOperator):
         merged = super()._resolve_config(config)
         if merged.get("vectors") and isinstance(merged["vectors"], list):
             return merged
-        v1, v2 = merged.get("vector1"), merged.get("vector2")
-        if (v1 is None or v1 == "") and merged.get("first_value") not in (None, ""):
-            v1 = merged.get("first_value")
-        if (v2 is None or v2 == "") and merged.get("second_value") not in (None, ""):
-            v2 = merged.get("second_value")
-        if v1 is not None and v2 is not None and v1 != "" and v2 != "":
-            out = {**merged, "vector1": v1, "vector2": v2}
-            # 避免非严格模式下基类把 first/second 塞进 vectors，误当作「两个向量引用」展平成两条超长向量
-            if merged.get("first_value") not in (None, "") or merged.get("second_value") not in (None, ""):
-                out.pop("vectors", None)
-            return out
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
@@ -1838,8 +1819,8 @@ class CosineSimilarityOperator(BaseOperator):
                     )
                 vecs.append(v)
         else:
-            v1 = get_value(data, config.get("vector1"), context)
-            v2 = get_value(data, config.get("vector2"), context)
+            v1 = get_value(data, config.get("first_value"), context)
+            v2 = get_value(data, config.get("second_value"), context)
 
             def _is_vector_list(x) -> bool:
                 # 外层为「向量组」：每一项是一条向量（数值列表，可含嵌套以便展平），不要求向量内部元素也是 list
@@ -1852,7 +1833,7 @@ class CosineSimilarityOperator(BaseOperator):
                 if v1_list is not None and v2_list is not None:
                     if len(v1_list) != len(v2_list):
                         raise OperatorException(
-                            f"vector1 与 vector2 为二维数组时，要求外层长度一致: {len(v1_list)} != {len(v2_list)}",
+                            f"first_value 与 second_value 为二维数组时，要求外层长度一致: {len(v1_list)} != {len(v2_list)}",
                             code=ErrorCode.SCHEMA_MISMATCH,
                             operator=self.name,
                             config=config,
@@ -1862,7 +1843,7 @@ class CosineSimilarityOperator(BaseOperator):
                     base_v2 = _to_numeric_vector(v2)
                     if base_v2 is None:
                         raise OperatorException(
-                            "vector2 无效或非数值",
+                            "second_value 无效或非数值",
                             code=ErrorCode.TYPE_ERROR,
                             operator=self.name,
                             config=config,
@@ -1872,7 +1853,7 @@ class CosineSimilarityOperator(BaseOperator):
                     base_v1 = _to_numeric_vector(v1)
                     if base_v1 is None:
                         raise OperatorException(
-                            "vector1 无效或非数值",
+                            "first_value 无效或非数值",
                             code=ErrorCode.TYPE_ERROR,
                             operator=self.name,
                             config=config,
@@ -1914,14 +1895,14 @@ class CosineSimilarityOperator(BaseOperator):
             vec2 = _to_numeric_vector(v2)
             if vec1 is None:
                 raise OperatorException(
-                    "vector1 无效或非数值",
+                    "first_value 无效或非数值",
                     code=ErrorCode.TYPE_ERROR,
                     operator=self.name,
                     config=config,
                 )
             if vec2 is None:
                 raise OperatorException(
-                    "vector2 无效或非数值",
+                    "second_value 无效或非数值",
                     code=ErrorCode.TYPE_ERROR,
                     operator=self.name,
                     config=config,
