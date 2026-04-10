@@ -3,7 +3,6 @@ from .context import ExecutionContext
 from .config_schema import validate_operator_config, require_config
 from .base_operator import BaseOperator
 from .registry import OperatorRegistry
-from .lineage import StepLineage, PipelineLineage
 from .error_contract import ERROR_CODE_TAXONOMY, error_payload
 from .data_model import DataValue, ScalarValue, ListValue, TableValue
 
@@ -15,8 +14,6 @@ __all__ = [
     "require_config",
     "BaseOperator",
     "OperatorRegistry",
-    "StepLineage",
-    "PipelineLineage",
     "ERROR_CODE_TAXONOMY",
     "error_payload",
     "DataValue",

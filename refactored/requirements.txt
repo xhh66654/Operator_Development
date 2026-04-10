@@ -1,0 +1,29 @@
+# refactored 项目依赖（Docker 部署建议：固定版本，便于可复现构建）
+# 建议 Python: 3.10+
+#
+# 分组说明：
+# - service: 启动 HTTP 服务（refactored/service.py）
+# - operators: CSV/Excel/统计/相关性/ES 等算子能力
+# - schema: JSON Schema 前置校验（缺失时会自动跳过，但建议安装）
+
+# -------------------------
+# service (HTTP)
+Flask==3.0.3
+flask-cors==4.0.1
+# 生产部署建议使用 WSGI（可选，但 Docker 常用）
+gunicorn==22.0.0
+
+# -------------------------
+# operators (data / numeric)
+numpy==1.26.4
+pandas==2.2.3
+openpyxl==3.1.5
+elasticsearch==8.13.2
+
+# -------------------------
+# schema validation（refactored/core/config_schema.py）
+jsonschema==4.23.0
+
+# -------------------------
+# optional: spearman_correlation 会优先使用 SciPy（未安装会走纯 Python 实现）
+scipy==1.12.0

@@ -15,7 +15,7 @@ ES_USER: Optional[str] = None
 ES_PASSWORD: Optional[str] = None
 ES_API_KEY: Optional[str] = None
 ES_CLOUD_ID: Optional[str] = None
-ES_TIMEOUT: int = 30
+ES_TIMEOUT: int = 200
 
 # 回调地址默认值（服务内置兜底；若环境变量 RESULT_CALLBACK_URL/STATUS_CALLBACK_URL 有配置则优先用环境变量）
 # Java 侧通常监听该地址接收 Python 计算结果。
