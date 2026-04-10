@@ -3,7 +3,12 @@ import statistics
 from typing import Any, Dict
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
-from .stats import _collect_values, _resolve_first_second_values_weights, _weights_flat
+from .stats import (
+    _collect_values,
+    _collect_values_first_only,
+    _resolve_first_second_values_weights,
+    _weights_flat,
+)
 
 
 @OperatorRegistry.register("dispersion")
@@ -67,7 +72,7 @@ class WeightedSumOfSquaredDeviationsOperator(BaseOperator):
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _collect_values_first_only(data, config, context, operator=self.name)
         if not values:
             return 0.0
         weights = _weights_flat(data, config.get("weights"), context, len(values), operator=self.name, config=config)

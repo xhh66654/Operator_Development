@@ -144,8 +144,9 @@ def _resolve_first_second_values_weights(merged: Dict[str, Any]) -> Dict[str, An
     顺序参数：first_value=观测值，second_value=权重。
 
     约定：
-    - 观测值只来自 first_value（不把 second_value 当样本参与统计）
-    - 权重优先来自 second_value（若显式传入）
+    - 凡调用本函数的算子，execute 中必须用 _collect_values_first_only 取观测，
+      不得用 _collect_values（否则 second_value 解析出的权重会被拼进样本）。
+    - 权重来自 weights 配置，或在与 first_value 同时配置 second_value 时由 second_value 覆盖写入 weights。
     """
     fv = merged.get("first_value")
     sv = merged.get("second_value")
@@ -742,7 +743,9 @@ class WeightedSumSquaresOperator(BaseOperator):
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _collect_values_first_only(data, config, context, operator=self.name)
+        if not values:
+            return 0.0
         weights = _weights_flat(data, config.get("weights"), context, len(values), operator=self.name, config=config)
         return sum(w * (v ** 2) for w, v in zip(weights, values))
 
@@ -777,7 +780,10 @@ class PercentileOperator(BaseOperator):
     def _resolve_config(self, config):
         merged = super()._resolve_config(config)
         if merged.get("percentile") in (None, "") and merged.get("second_value") not in (None, ""):
+            merged = dict(merged)
             merged["percentile"] = merged.get("second_value")
+            # 已作为分位点，勿再被 _collect_values 当成样本槽位
+            merged["second_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
@@ -1150,7 +1156,7 @@ class WeightedLogSumSquareOperator(BaseOperator):
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _collect_values_first_only(data, config, context, operator=self.name)
         if not values or any(v <= 0 for v in values):
             raise OperatorException(
                 "weighted_log_sum_square 要求所有值为正数",
@@ -1199,7 +1205,7 @@ class WeightedExpSumSquareOperator(BaseOperator):
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _collect_values_first_only(data, config, context, operator=self.name)
         if not values:
             return 0.0
         weights = _weights_flat(data, config.get("weights"), context, len(values), operator=self.name, config=config)
@@ -1224,7 +1230,7 @@ class WeightedLogMeanOperator(BaseOperator):
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _collect_values_first_only(data, config, context, operator=self.name)
         if not values or any(v <= 0 for v in values):
             raise OperatorException(
                 "weighted_log_mean 要求所有值为正数",
@@ -1257,7 +1263,7 @@ class WeightedExpMeanOperator(BaseOperator):
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _collect_values_first_only(data, config, context, operator=self.name)
         if not values:
             return 0.0
         weights = _weights_flat(data, config.get("weights"), context, len(values), operator=self.name, config=config)

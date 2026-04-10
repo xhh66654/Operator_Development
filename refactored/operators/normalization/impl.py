@@ -96,13 +96,14 @@ class MinMaxNormalizeOperator(BaseOperator):
     default_config = {}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
+        merged = dict(super()._resolve_config(config))
         if merged.get("min_val") in (None, "") and merged.get("second_value") not in (None, ""):
-            merged = dict(merged)
             merged["min_val"] = merged.get("second_value")
+            # 已作为下界，勿再被 _collect_values 拼进待归一化向量
+            merged["second_value"] = None
         if merged.get("max_val") in (None, "") and merged.get("third_value") not in (None, ""):
-            merged = dict(merged)
             merged["max_val"] = merged.get("third_value")
+            merged["third_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
