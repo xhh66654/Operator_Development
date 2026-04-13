@@ -1,14 +1,44 @@
 """
 比较与阈值算子：
   极值类   max / min
-  阈值类   compare_threshold
-  范围比较 支持多区间和单阈值
+  阈值类   compare_threshold（兼容旧配置）、single_compare_threshold、multi_compare_threshold
 """
 import json
+from typing import Any
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...core.exceptions import OperatorException, ErrorCode
 from ...utils import safe_convert_to_number
 from .._common import get_value, to_number
+
+
+def _threshold_compare_bool(
+    value: float,
+    threshold: float,
+    compare_type: str,
+    *,
+    operator_name: str,
+    strict_op: bool,
+    config: dict,
+) -> bool:
+    ct = (compare_type or "eq").lower().strip()
+    if ct == "gt":
+        return value > threshold
+    if ct == "lt":
+        return value < threshold
+    if ct == "ge":
+        return value >= threshold
+    if ct == "le":
+        return value <= threshold
+    if ct == "eq":
+        return value == threshold
+    if strict_op:
+        raise OperatorException(
+            f"不支持的比较符: {compare_type!r}（支持 gt/lt/ge/le/eq）",
+            code=ErrorCode.CONFIG_INVALID,
+            operator=operator_name,
+            config=config,
+        )
+    return False
 
 
 def _flatten_to_numbers(val) -> list:
@@ -306,17 +336,216 @@ class CompareThresholdOperator(BaseOperator):
             or self.default_config.get("result_mapping")
             or {}
         )
-        out = False
-        if compare_type == "gt":
-            out = value > threshold_val
-        elif compare_type == "lt":
-            out = value < threshold_val
-        elif compare_type == "ge":
-            out = value >= threshold_val
-        elif compare_type == "le":
-            out = value <= threshold_val
-        elif compare_type == "eq":
-            out = value == threshold_val
+        out = _threshold_compare_bool(
+            value,
+            threshold_val,
+            compare_type,
+            operator_name=self.name,
+            strict_op=False,
+            config=config,
+        )
         # 兼容两种 mapping key：{"true": "..."} 或 {"True": "..."} 或 {"false": "..."}
         k = "true" if out else "false"
         return result_mapping.get(k, result_mapping.get(str(out).lower(), config.get("default_label") or "未知"))
+
+
+def _resolve_labels_ref(data, ref, context):
+    """多阈值分段：标签列表可为字面量或引用。"""
+    if ref is None:
+        return None
+    val = get_value(data, ref, context)
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str) and val.strip().startswith("["):
+        try:
+            parsed = json.loads(val)
+            if isinstance(parsed, list):
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return val if isinstance(val, (list, tuple)) else [val]
+
+
+def _resolve_numeric_bound_list(data, ref, context, operator_name: str) -> list:
+    """解析下界/上界数组（支持字面量、JSON 字符串、引用）。"""
+    if ref is None:
+        return []
+    raw = get_value(data, ref, context)
+    if isinstance(raw, str) and raw.strip().startswith("["):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                raw = parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if not isinstance(raw, list):
+        raise OperatorException(
+            "多阈值分段要求 second_value / third_value 为等长的数值数组",
+            code=ErrorCode.CONFIG_FORMAT_ERROR,
+            operator=operator_name,
+            config={"ref": ref},
+        )
+    out = []
+    for x in raw:
+        n = safe_convert_to_number(x)
+        if n is None:
+            raise OperatorException(
+                f"边界列表中存在无法转为数字的元素: {x!r}",
+                code=ErrorCode.FORMAT_ERROR,
+                operator=operator_name,
+                config={"ref": ref},
+            )
+        out.append(float(n))
+    return out
+
+
+def _multi_segment_label(
+    value: float,
+    lows: list,
+    highs: list,
+    labels: list,
+    default_label: Any,
+) -> Any:
+    """
+    second_value[i] 与 third_value[i] 一一对应，第 i 段为闭区间 [lows[i], highs[i]]。
+    边界值若落入多段，按段顺序取最先命中的一段。
+    """
+    n = len(lows)
+    if n == 0 or len(highs) != n:
+        return default_label
+    for i in range(n):
+        lo = lows[i]
+        hi = highs[i]
+        if lo <= value <= hi:
+            return labels[i] if i < len(labels) else default_label
+    return default_label
+
+
+@OperatorRegistry.register("single_compare_threshold")
+class SingleCompareThresholdOperator(BaseOperator):
+    """
+    单阈值比较：
+    - first_value：待比较数据（标量、列表或引用）
+    - second_value：单阈值（标量常量或引用，一般前端传常量）
+    - third_value：比较关系 gt / lt / ge / le / eq
+    - fourth_value：满足条件时的取值（如 \"PASS\"）
+    - fifth_value：不满足条件时的取值（如 \"FAIL\"）
+    """
+
+    name = "single_compare_threshold"
+    config_schema = {
+        "type": "object",
+        "properties": {
+            "first_value": {},
+            "second_value": {},
+            "third_value": {},
+            "fourth_value": {},
+            "fifth_value": {},
+        },
+    }
+    default_config = {"fourth_value": "PASS", "fifth_value": "FAIL"}
+
+    def execute(self, data, config, context: ExecutionContext):
+        source_ref = config.get("first_value")
+        field_val = get_value(data, source_ref, context)
+        if field_val is None:
+            raise OperatorException(
+                "待比较字段为空或未找到",
+                code=ErrorCode.DATA_NOT_FOUND,
+                operator=self.name,
+                config=config,
+            )
+        if isinstance(field_val, list):
+            return [
+                self.execute({"_v": v}, {**config, "first_value": "_v"}, context)
+                for v in field_val
+            ]
+
+        value = to_number(field_val)
+        threshold_ref = config.get("second_value")
+        threshold_raw = get_value(data, threshold_ref, context)
+        if threshold_raw is None:
+            raise OperatorException(
+                "阈值为空或未找到（请配置 second_value）",
+                code=ErrorCode.DATA_NOT_FOUND,
+                operator=self.name,
+                config=config,
+            )
+        threshold_val = to_number(threshold_raw)
+        compare_type = config.get("third_value") or "eq"
+        pass_label = config.get("fourth_value", self.default_config["fourth_value"])
+        fail_label = config.get("fifth_value", self.default_config["fifth_value"])
+        out = _threshold_compare_bool(
+            value,
+            threshold_val,
+            str(compare_type),
+            operator_name=self.name,
+            strict_op=True,
+            config=config,
+        )
+        return pass_label if out else fail_label
+
+
+@OperatorRegistry.register("multi_compare_threshold")
+class MultiCompareThresholdOperator(BaseOperator):
+    """
+    多阈值分段比较（段与段一一对应，闭区间）：
+    - first_value：分数或数值列表/标量
+    - second_value：各段下界数组，如 [0, 60, 80]
+    - third_value：各段上界数组，与 second 等长且一一对应，如 [60, 80, 100]
+      表示 [0,60]、[60,80]、[80,100] 三段（均为闭区间；边界重合时先匹配的段生效）
+    - fourth_value：各段标签数组（与段数等长）
+    - fifth_value：未命中任一段时的默认标签
+    """
+
+    name = "multi_compare_threshold"
+    config_schema = {
+        "type": "object",
+        "properties": {
+            "first_value": {},
+            "second_value": {},
+            "third_value": {},
+            "fourth_value": {},
+            "fifth_value": {},
+        },
+    }
+    default_config = {"fifth_value": "未匹配"}
+
+    def execute(self, data, config, context: ExecutionContext):
+        labels_ref = config.get("fourth_value")
+        lows = _resolve_numeric_bound_list(data, config.get("second_value"), context, self.name)
+        highs = _resolve_numeric_bound_list(data, config.get("third_value"), context, self.name)
+        if len(lows) != len(highs) or not lows:
+            raise OperatorException(
+                "second_value 与 third_value 须为非空且等长的数值数组",
+                code=ErrorCode.CONFIG_FORMAT_ERROR,
+                operator=self.name,
+                config=config,
+            )
+        labels = _resolve_labels_ref(data, labels_ref, context)
+        if not isinstance(labels, list) or len(labels) != len(lows):
+            raise OperatorException(
+                "fourth_value 须为与区间等长的标签数组",
+                code=ErrorCode.CONFIG_FORMAT_ERROR,
+                operator=self.name,
+                config=config,
+            )
+        default_label = config.get("fifth_value", self.default_config["fifth_value"])
+
+        source_ref = config.get("first_value")
+        field_val = get_value(data, source_ref, context)
+        if field_val is None:
+            raise OperatorException(
+                "待比较数据为空或未找到",
+                code=ErrorCode.DATA_NOT_FOUND,
+                operator=self.name,
+                config=config,
+            )
+        if isinstance(field_val, list):
+            return [
+                self.execute({"_v": v}, {**config, "first_value": "_v"}, context)
+                for v in field_val
+            ]
+
+        value = to_number(field_val)
+        return _multi_segment_label(value, lows, highs, labels, default_label)

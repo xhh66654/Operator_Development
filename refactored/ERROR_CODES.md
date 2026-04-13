@@ -10,12 +10,12 @@
 |------|--------|--------------------------------------|----------------|
 | **1001** | `DATA_NOT_FOUND` | `data_not_found` | **数据/引用取不到**：如 `${step}` 在上下文中不存在、字段缺失、`get_value` 严格模式下引用解析为 `None`、比较/统计时待取值为空等。 |
 | **1002** | `CONFIG_MISSING` | `config_missing` | **配置缺项**：必填参数未提供（如缺少 `first_value`、ES 缺少 `es_hosts`/`index`、文件算子缺少 `file_path` 等）。 |
-| **1003** | `CONFIG_TYPE_ERROR` | `config_type_error` | **配置类型不对**：与 `CONFIG_FORMAT_ERROR` 同值（历史别名），表示配置项类型不符合预期。 |
-| **1003** | `CONFIG_FORMAT_ERROR` | （与上同值，别名） | 与 `CONFIG_TYPE_ERROR` 相同数值，用于兼容旧名；语义上偏「格式/类型」类配置错误。 |
+| **1003** | `CONFIG_TYPE_ERROR` | `config_type_error` | **JSON Schema 配置校验失败**：类型不符、`required` 缺失、`additionalProperties` 不允许的键等（见 `config_schema.validate_operator_config`；**未安装 `jsonschema` 时该校验会跳过**，生产请按 `refactored/requirements.txt` 安装）。 |
 | **1004** | `CONFIG_INVALID` | `config_invalid` | **配置不合法**：DAG 协议校验失败、`execution_mode` 不对、`reasoningDataList` 结构非法、业务规则不允许的配置组合等。 |
 | **1005** | `DEPENDENCY_ERROR` | `dependency_error` | **依赖不满足**：前置条件未满足（如应先连接 ES 再提取、缺少依赖算子输出等，具体见各算子报错文案）。 |
 | **1006** | `VERSION_UNSUPPORTED` | `version_unsupported` | **版本不支持**：请求或功能版本不被当前实现支持（若业务启用）。 |
 | **1007** | `DUPLICATE_RUN_ID` | `duplicate_run_id` | **重复 runId**：同一 `runId` 已在执行中，被生命周期层拒绝重复提交（见 `run_lifecycle`）。 |
+| **1008** | `CONFIG_FORMAT_ERROR` | `config_format_error` | **非法旧输入键或部分算子不支持的配置组合**：如配置中出现 `field`/`source`/`vectors` 等已弃用的输入键（见 `base_operator._reject_legacy_input_keys`）；部分算术算子在执行阶段对参数组合的限制也使用此码（见各算子实现）。 |
 | **2001** | `TYPE_ERROR` | `type_error` | **类型错误**：值不是期望类型（如应为数值却是非数字字符串、矩阵维度不符等）。 |
 | **2002** | `FORMAT_ERROR` | `format_error` | **格式错误**：字符串无法按预期解析为数字/日期等格式。 |
 | **2003** | `SCHEMA_MISMATCH` | `schema_mismatch` | **结构/长度不匹配**：如加权算子权重数量与样本数量不一致、向量长度不一致等。 |
@@ -30,8 +30,8 @@
 
 ### 说明
 
-- **1003 出现两次**：`CONFIG_TYPE_ERROR` 与 `CONFIG_FORMAT_ERROR` 在枚举里**共用整数 1003**，对外只算**一个数值档位**。
-- **taxonomy**：`refactored/core/error_contract.py` 中的 `ERROR_CODE_TAXONOMY` 为部分码提供了英文 slug，便于日志或对接系统使用；其中未单独列出 `CONFIG_FORMAT_ERROR`（与 1003 重复）。
+- **1003 与 1008**：`CONFIG_TYPE_ERROR`（1003）专指 **jsonschema 层**校验失败；`CONFIG_FORMAT_ERROR`（1008）专指 **非法旧键**及部分算子对配置组合的拒绝，二者数值不同，调用方可区分。
+- **taxonomy**：`refactored/core/error_contract.py` 中的 `ERROR_CODE_TAXONOMY` 为上述码及常用码提供英文 slug。
 
 ---
 

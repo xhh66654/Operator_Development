@@ -12,7 +12,7 @@ from typing import Any
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...utils import safe_convert_to_number
 from .._common import get_value, to_number
-from ..statistics.stats import _collect_values
+from ..statistics.stats import _collect_values, _ensure_sample_from_first_value_only
 
 
 @OperatorRegistry.register("normalize")
@@ -89,10 +89,14 @@ class MinMaxNormalizeOperator(BaseOperator):
     可选 min_val / max_val 指定固定上下界，否则从数据中自动取。
     """
     name = "min_max_normalize"
-    config_schema = {"type": "object", "properties": {
-        "min_val": {}, "max_val": {},
-        "first_value": {}, "second_value": {}, "third_value": {},
-    }}
+    config_schema = {
+        "type": "object",
+        "required": ["first_value"],
+        "properties": {
+            "min_val": {}, "max_val": {},
+            "first_value": {}, "second_value": {}, "third_value": {},
+        },
+    }
     default_config = {}
 
     def _resolve_config(self, config):
@@ -107,9 +111,7 @@ class MinMaxNormalizeOperator(BaseOperator):
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
-        if not values:
-            return []
+        values = _ensure_sample_from_first_value_only(data, config, context, operator=self.name)
         min_raw = config.get("min_val")
         max_raw = config.get("max_val")
 

@@ -197,9 +197,10 @@ class SplitStringOperator(BaseOperator):
     default_config = {}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
+        merged = dict(super()._resolve_config(config))
         if merged.get("separator") in (None, "") and merged.get("second_value") not in (None, ""):
             merged["separator"] = merged.get("second_value")
+            merged["second_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
@@ -229,11 +230,13 @@ class JoinListOperator(BaseOperator):
     default_config = {"separator": ",", "quote_elements": False}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
+        merged = dict(super()._resolve_config(config))
         if merged.get("separator") in (None, "") and merged.get("second_value") not in (None, ""):
             merged["separator"] = merged.get("second_value")
+            merged["second_value"] = None
         if merged.get("quote_elements") in (None, "") and merged.get("third_value") not in (None, ""):
             merged["quote_elements"] = bool(merged.get("third_value"))
+            merged["third_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):

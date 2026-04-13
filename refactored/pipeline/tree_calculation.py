@@ -182,6 +182,8 @@ _OPERATOR_KEY_ALIASES: Dict[str, str] = {
     "除法": "divide",
     "幂": "power",
     "阈值比较": "compare_threshold",
+    "单阈值比较": "single_compare_threshold",
+    "多阈值分段": "multi_compare_threshold",
 }
 
 

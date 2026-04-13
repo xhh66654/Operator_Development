@@ -72,16 +72,22 @@ class ExtractFromCsvOperator(BaseOperator):
         # sixth_value -> max_rows
         if c.get("file_path") in (None, "") and c.get("first_value") not in (None, ""):
             c["file_path"] = c.get("first_value")
+            c["first_value"] = None
         if c.get("encoding") in (None, "") and c.get("second_value") not in (None, ""):
             c["encoding"] = c.get("second_value")
+            c["second_value"] = None
         if c.get("delimiter") in (None, "") and c.get("third_value") not in (None, ""):
             c["delimiter"] = c.get("third_value")
+            c["third_value"] = None
         if c.get("selected_columns") in (None, "") and c.get("fourth_value") not in (None, ""):
             c["selected_columns"] = c.get("fourth_value")
+            c["fourth_value"] = None
         if c.get("skip_rows") in (None, "") and c.get("fifth_value") not in (None, ""):
             c["skip_rows"] = c.get("fifth_value")
+            c["fifth_value"] = None
         if c.get("max_rows") in (None, "") and c.get("sixth_value") not in (None, ""):
             c["max_rows"] = c.get("sixth_value")
+            c["sixth_value"] = None
         return c
 
     def execute(self, data, config, context: ExecutionContext):

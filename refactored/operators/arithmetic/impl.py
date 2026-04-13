@@ -1731,219 +1731,125 @@ class MatrixMultiplyOperator(BaseOperator):
 @OperatorRegistry.register("cosine_similarity")
 class CosineSimilarityOperator(BaseOperator):
     """
-    余弦相似度算子：计算向量间的相似度
-    
-    功能说明：
-    - 计算两个或多个向量的余弦相似度
-    - 2个向量返回标量，3+个向量返回相似度矩阵
-    
-    计算逻辑：
-    cos_sim(a, b) = (a·b) / (|a| × |b|)
-    其中 a·b 是点积，|a| 是向量模长
-    
-    取值范围: [-1, 1]
-    - 1: 完全相同方向
-    - 0: 正交
-    - -1: 完全相反方向
-    
-    配置参数：
-    - vectors (array): 向量列表（推荐）
-      每个元素是数值列表：[1.0, 2.0, 3.0]
-    - first_value, second_value: 两个向量（字段名、${step_key} 或字面量）
-    
-    输入数据格式：
-    base_data: {
-        "vec1": [1, 2, 3],
-        "vec2": [4, 5, 6]
-    }
-    
-    配置示例：
-    {
-        "operator": "cosine_similarity",
-        "config": {
-            "vectors": ["vec1", "vec2"]
-        }
-    }
-    
-    输出格式：
-    - 2个向量: 0.9746 (标量)
-    - 3+个向量: [[1.0, 0.97, ...], [0.97, 1.0, ...], ...] (矩阵)
-    
-    向量要求：
-    - 所有向量长度必须相同
-    - 不能有零向量（模长为0）
-    - 只接受数值，不支持JSON数组字符串
-    
-    使用场景：
-    - 文本相似度（词向量）
-    - 推荐系统（用户相似度）
-    - 图像检索
-    - 聚类分析
-    
-    异常处理：
-    - 向量长度不一致时报错
-    - 零向量时报错
+    余弦相似度算子：计算两个向量之间的相似度（或二维向量组批量成对计算）。
+    计算逻辑：cos_sim(a, b) = (a·b) / (|a| × |b|)
+    取值范围: [-1, 1]（1 同向，0 正交，-1 反向）
+    向量须等长、模长不能为0。
     """
     name = "cosine_similarity"
     config_schema = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "vectors": {"type": "array"},
             "first_value": {},
             "second_value": {},
         },
     }
     default_config = {}
 
-    def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        if merged.get("vectors") and isinstance(merged["vectors"], list):
-            return merged
-        return merged
-
     def execute(self, data, config, context: ExecutionContext):
-        vectors_config = config.get("vectors")
-        if vectors_config is not None and len(vectors_config) > 0:
-            # N 个向量
-            vecs = []
-            for key in vectors_config:
-                raw = get_value(data, key, context)
-                v = _to_numeric_vector(raw)
-                if v is None:
+        v1 = get_value(data, config.get("first_value"), context)
+        v2 = get_value(data, config.get("second_value"), context)
+
+        def _is_vector_list(x) -> bool:
+            return isinstance(x, list) and len(x) > 0 and all(isinstance(row, list) for row in x)
+
+        if _is_vector_list(v1) or _is_vector_list(v2):
+            v1_list = v1 if _is_vector_list(v1) else None
+            v2_list = v2 if _is_vector_list(v2) else None
+            if v1_list is not None and v2_list is not None:
+                if len(v1_list) != len(v2_list):
                     raise OperatorException(
-                        f"向量数据无效或非数值: {key}",
+                        f"first_value 与 second_value 为二维数组时，要求外层长度一致: {len(v1_list)} != {len(v2_list)}",
+                        code=ErrorCode.SCHEMA_MISMATCH,
+                        operator=self.name,
+                        config=config,
+                    )
+                pairs = list(zip(v1_list, v2_list))
+            elif v1_list is not None:
+                base_v2 = _to_numeric_vector(v2)
+                if base_v2 is None:
+                    raise OperatorException(
+                        "second_value 无效或非数值",
                         code=ErrorCode.TYPE_ERROR,
                         operator=self.name,
                         config=config,
                     )
-                vecs.append(v)
-        else:
-            v1 = get_value(data, config.get("first_value"), context)
-            v2 = get_value(data, config.get("second_value"), context)
+                pairs = [(a, base_v2) for a in v1_list]
+            else:
+                base_v1 = _to_numeric_vector(v1)
+                if base_v1 is None:
+                    raise OperatorException(
+                        "first_value 无效或非数值",
+                        code=ErrorCode.TYPE_ERROR,
+                        operator=self.name,
+                        config=config,
+                    )
+                pairs = [(base_v1, b) for b in v2_list]  # type: ignore[list-item]
 
-            def _is_vector_list(x) -> bool:
-                # 外层为「向量组」：每一项是一条向量（数值列表，可含嵌套以便展平），不要求向量内部元素也是 list
-                return isinstance(x, list) and len(x) > 0 and all(isinstance(row, list) for row in x)
+            def _cos_pair(a, b):
+                aa = _to_numeric_vector(a)
+                bb = _to_numeric_vector(b)
+                if aa is None or bb is None:
+                    raise OperatorException(
+                        "向量数据无效或非数值",
+                        code=ErrorCode.TYPE_ERROR,
+                        operator=self.name,
+                        config=config,
+                    )
+                if len(aa) != len(bb):
+                    raise OperatorException(
+                        f"各向量长度须一致，当前长度: {[len(aa), len(bb)]}",
+                        code=ErrorCode.CONFIG_INVALID,
+                        operator=self.name,
+                        config=config,
+                    )
+                dot = sum(x * y for x, y in zip(aa, bb))
+                norm_a = math.sqrt(sum(x * x for x in aa))
+                norm_b = math.sqrt(sum(y * y for y in bb))
+                if norm_a == 0 or norm_b == 0:
+                    raise OperatorException(
+                        "存在模长为 0 的向量，无法计算余弦相似度",
+                        code=ErrorCode.CALC_LOGIC_ERROR,
+                        operator=self.name,
+                        config=config,
+                    )
+                return dot / (norm_a * norm_b)
 
-            # 新增：支持两组“向量列表”一一对应计算，返回相似度列表
-            if _is_vector_list(v1) or _is_vector_list(v2):
-                v1_list = v1 if _is_vector_list(v1) else None
-                v2_list = v2 if _is_vector_list(v2) else None
-                if v1_list is not None and v2_list is not None:
-                    if len(v1_list) != len(v2_list):
-                        raise OperatorException(
-                            f"first_value 与 second_value 为二维数组时，要求外层长度一致: {len(v1_list)} != {len(v2_list)}",
-                            code=ErrorCode.SCHEMA_MISMATCH,
-                            operator=self.name,
-                            config=config,
-                        )
-                    pairs = list(zip(v1_list, v2_list))
-                elif v1_list is not None:
-                    base_v2 = _to_numeric_vector(v2)
-                    if base_v2 is None:
-                        raise OperatorException(
-                            "second_value 无效或非数值",
-                            code=ErrorCode.TYPE_ERROR,
-                            operator=self.name,
-                            config=config,
-                        )
-                    pairs = [(a, base_v2) for a in v1_list]
-                else:
-                    base_v1 = _to_numeric_vector(v1)
-                    if base_v1 is None:
-                        raise OperatorException(
-                            "first_value 无效或非数值",
-                            code=ErrorCode.TYPE_ERROR,
-                            operator=self.name,
-                            config=config,
-                        )
-                    pairs = [(base_v1, b) for b in v2_list]  # type: ignore[list-item]
+            return [_cos_pair(a, b) for a, b in pairs]
 
-                def _cos_pair(a, b):
-                    aa = _to_numeric_vector(a)
-                    bb = _to_numeric_vector(b)
-                    if aa is None or bb is None:
-                        raise OperatorException(
-                            "向量数据无效或非数值",
-                            code=ErrorCode.TYPE_ERROR,
-                            operator=self.name,
-                            config=config,
-                        )
-                    if len(aa) != len(bb):
-                        raise OperatorException(
-                            f"各向量长度须一致，当前长度: {[len(aa), len(bb)]}",
-                            code=ErrorCode.CONFIG_INVALID,
-                            operator=self.name,
-                            config=config,
-                        )
-                    dot = sum(x * y for x, y in zip(aa, bb))
-                    norm_a = math.sqrt(sum(x * x for x in aa))
-                    norm_b = math.sqrt(sum(y * y for y in bb))
-                    if norm_a == 0 or norm_b == 0:
-                        raise OperatorException(
-                            "存在模长为 0 的向量，无法计算余弦相似度",
-                            code=ErrorCode.CALC_LOGIC_ERROR,
-                            operator=self.name,
-                            config=config,
-                        )
-                    return dot / (norm_a * norm_b)
-
-                return [_cos_pair(a, b) for a, b in pairs]
-
-            vec1 = _to_numeric_vector(v1)
-            vec2 = _to_numeric_vector(v2)
-            if vec1 is None:
-                raise OperatorException(
-                    "first_value 无效或非数值",
-                    code=ErrorCode.TYPE_ERROR,
-                    operator=self.name,
-                    config=config,
-                )
-            if vec2 is None:
-                raise OperatorException(
-                    "second_value 无效或非数值",
-                    code=ErrorCode.TYPE_ERROR,
-                    operator=self.name,
-                    config=config,
-                )
-            vecs = [vec1, vec2]
-
-        if len(vecs) == 1:
-            return 1.0
-
-        n = len(vecs)
-        lens = [len(v) for v in vecs]
-        if len(set(lens)) != 1:
+        vec1 = _to_numeric_vector(v1)
+        vec2 = _to_numeric_vector(v2)
+        if vec1 is None:
             raise OperatorException(
-                f"各向量长度须一致，当前长度: {lens}",
+                "first_value 无效或非数值",
+                code=ErrorCode.TYPE_ERROR,
+                operator=self.name,
+                config=config,
+            )
+        if vec2 is None:
+            raise OperatorException(
+                "second_value 无效或非数值",
+                code=ErrorCode.TYPE_ERROR,
+                operator=self.name,
+                config=config,
+            )
+        if len(vec1) != len(vec2):
+            raise OperatorException(
+                f"各向量长度须一致，当前长度: {[len(vec1), len(vec2)]}",
                 code=ErrorCode.CONFIG_INVALID,
                 operator=self.name,
                 config=config,
             )
+        dot = sum(x * y for x, y in zip(vec1, vec2))
+        norm_a = math.sqrt(sum(x * x for x in vec1))
+        norm_b = math.sqrt(sum(y * y for y in vec2))
+        if norm_a == 0 or norm_b == 0:
+            raise OperatorException(
+                "存在模长为 0 的向量，无法计算余弦相似度",
+                code=ErrorCode.CALC_LOGIC_ERROR,
+                operator=self.name,
+                config=config,
+            )
+        return dot / (norm_a * norm_b)
 
-        def cos_pair(a, b):
-            dot = sum(x * y for x, y in zip(a, b))
-            norm_a = math.sqrt(sum(x * x for x in a))
-            norm_b = math.sqrt(sum(x * x for x in b))
-            if norm_a == 0 or norm_b == 0:
-                raise OperatorException(
-                    "存在模长为 0 的向量，无法计算余弦相似度",
-                    code=ErrorCode.CALC_LOGIC_ERROR,
-                    operator=self.name,
-                    config=config,
-                )
-            return dot / (norm_a * norm_b)
-
-        if n == 2:
-            return cos_pair(vecs[0], vecs[1])
-
-        # N≥3: 返回完整对称相似度矩阵（二维列表）
-        matrix = [[0.0] * n for _ in range(n)]
-        for i in range(n):
-            matrix[i][i] = 1.0
-            for j in range(i + 1, n):
-                val = cos_pair(vecs[i], vecs[j])
-                matrix[i][j] = val
-                matrix[j][i] = val
-        return matrix

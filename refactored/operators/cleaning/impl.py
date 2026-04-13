@@ -14,6 +14,7 @@ except ImportError:
 from ...core import BaseOperator, ExecutionContext, OperatorException, OperatorRegistry
 from ...core.exceptions import ErrorCode
 from ...utils import extract_field_value
+from ...utils.field_extractor import _parse_context_ref
 from .._common import _ctx, get_value, rows_to_field_list_dict
 
 
@@ -149,27 +150,117 @@ def _is_blank_field(field_name: str) -> bool:
     return not (field_name or "").strip()
 
 
+_FILTER_SLOT_OPS = frozenset({
+    "eq", "ne", "gt", "ge", "lt", "le", "in", "not_in", "between", "range",
+    "contains", "includes", "not_contains", "excludes",
+})
+
+
+def _context_step_base_ref(step_key: str) -> str:
+    """${step_key}.列名 → 取行表时用 ${step_key}。"""
+    return "${%s}" % (step_key or "").strip()
+
+
 @OperatorRegistry.register("filter_by_condition")
 class FilterByConditionOperator(BaseOperator):
-    """按条件过滤：支持记录列表（按字段）或单纯数组（按元素值）。数据来源为 first_value；conditions 为 second_value。"""
+    """按条件过滤：记录列表或标量数组。槽位写法：first_value 为 `${step}` 或 `${step}.列名`，
+    second_value 为比较符，third_value 为比较值。另支持 conditions 或 second_value 为条件 list/dict。"""
     name = "filter_by_condition"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "conditions": {}}}
+    config_schema = {
+        "type": "object",
+        "properties": {
+            "first_value": {},
+            "second_value": {},
+            "third_value": {},
+            "fourth_value": {},
+            "conditions": {},
+            "_slot_row_filter": {},
+        },
+    }
     default_config = {"conditions": {}}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
-        if merged.get("second_value") not in (None, ""):
-            merged["conditions"] = merged.get("second_value")
+        merged = dict(super()._resolve_config(config))
+        raw_conds = merged.get("conditions")
+        has_explicit = False
+        if isinstance(raw_conds, list) and len(raw_conds) > 0:
+            has_explicit = True
+        if isinstance(raw_conds, dict) and len(raw_conds) > 0:
+            has_explicit = True
+
+        if has_explicit:
+            return merged
+
+        sv0 = merged.get("second_value")
+        if isinstance(sv0, (list, dict)):
+            merged["conditions"] = sv0
+            merged["second_value"] = None
+            return merged
+
+        fv0 = merged.get("first_value")
+        tv = merged.get("third_value")
+        sv = merged.get("second_value")
+        op_third = isinstance(tv, str) and tv.strip().lower() in _FILTER_SLOT_OPS
+        op_second = isinstance(sv, str) and sv.strip().lower() in _FILTER_SLOT_OPS
+
+        # 已废弃：first + second 列名 + third 比较符 + fourth 比较值
+        if (
+            fv0 not in (None, "")
+            and op_third
+            and isinstance(sv, str)
+            and not op_second
+        ):
+            raise OperatorException(
+                "条件过滤已不再支持「四槽」写法（first 数据源 + second 列名 + third 比较符 + fourth 比较值）。"
+                "请改为合并 first_value：使用 `${step}.列名` 表示数据与比较列，"
+                "second_value 传比较符，third_value 传比较值。",
+                code=ErrorCode.CONFIG_FORMAT_ERROR,
+                operator=self.name,
+                config=config,
+            )
+
+        if op_second and fv0 not in (None, ""):
+            field_name = ""
+            if isinstance(fv0, str):
+                cref = _parse_context_ref(fv0)
+                if cref and cref[1]:
+                    field_name = str(cref[1]).strip()
+            merged["conditions"] = [
+                {"field": field_name, "operator": sv.strip().lower(), "value": merged.get("third_value")}
+            ]
+            merged["_slot_row_filter"] = True
+            return merged
+
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        raw_source = extract_field_value(data, config.get("first_value"), _ctx(context))
+        ctx = _ctx(context)
+        fv = config.get("first_value")
+        if config.get("_slot_row_filter") and isinstance(fv, str):
+            cref = _parse_context_ref(fv)
+            if cref and cref[1]:
+                step_key, _sub = cref
+                raw_source = extract_field_value(data, _context_step_base_ref(step_key), ctx)
+            else:
+                raw_source = extract_field_value(data, fv, ctx)
+        else:
+            raw_source = extract_field_value(data, fv, ctx)
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
         input_is_columns = columns_dict is not None
         raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
         raw_conditions = config.get("conditions", {})
 
         cond_list: list = self._normalize_conditions(raw_conditions)
+
+        if config.get("_slot_row_filter") and raw_data:
+            if any(isinstance(item, dict) for item in raw_data):
+                if cond_list and _is_blank_field(str(cond_list[0].get("field", ""))):
+                    raise OperatorException(
+                        "按记录行过滤时须在 first_value 中带上 `.列名`（如 ${extract_rows}.score）。",
+                        code=ErrorCode.CONFIG_MISSING,
+                        operator=self.name,
+                        config=config,
+                    )
 
         out = []
         for item in raw_data:
@@ -317,9 +408,10 @@ class RemoveDuplicatesOperator(BaseOperator):
     default_config = {}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
+        merged = dict(super()._resolve_config(config))
         if merged.get("second_value") not in (None, ""):
             merged["key_fields"] = merged.get("second_value")
+            merged["second_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
@@ -358,13 +450,16 @@ class RemoveNullsOperator(BaseOperator):
     default_config = {"strategy": "remove", "fill_value": 0, "null_values": [None, "", "null", "NULL", "N/A", "n/a"]}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
+        merged = dict(super()._resolve_config(config))
         if merged.get("second_value") not in (None, ""):
             merged["fields_to_check"] = merged.get("second_value")
+            merged["second_value"] = None
         if merged.get("third_value") not in (None, ""):
             merged["strategy"] = merged.get("third_value")
+            merged["third_value"] = None
         if merged.get("fourth_value") not in (None, ""):
             merged["null_values"] = merged.get("fourth_value")
+            merged["fourth_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
@@ -435,13 +530,16 @@ class RemoveOutliersOperator(BaseOperator):
     default_config = {"method": "iqr", "threshold": 1.5, "strategy": "remove"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
+        merged = dict(super()._resolve_config(config))
         if merged.get("second_value") not in (None, ""):
             merged["target_fields"] = merged.get("second_value")
+            merged["second_value"] = None
         if merged.get("third_value") not in (None, ""):
             merged["method"] = merged.get("third_value")
+            merged["third_value"] = None
         if merged.get("fourth_value") not in (None, ""):
             merged["threshold"] = merged.get("fourth_value")
+            merged["fourth_value"] = None
         return merged
 
     @staticmethod
@@ -537,13 +635,16 @@ class SortDataOperator(BaseOperator):
     default_config = {"order": "asc", "null_placement": "last"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
+        merged = dict(super()._resolve_config(config))
         if merged.get("second_value") not in (None, ""):
             merged["sort_by"] = merged.get("second_value")
+            merged["second_value"] = None
         if merged.get("third_value") not in (None, ""):
             merged["order"] = "asc" if bool(merged.get("third_value")) else "desc"
+            merged["third_value"] = None
         if merged.get("fourth_value") not in (None, ""):
             merged["null_placement"] = merged.get("fourth_value")
+            merged["fourth_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
@@ -599,9 +700,10 @@ class RenameFieldsOperator(BaseOperator):
     default_config = {"mappings": {}}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
+        merged = dict(super()._resolve_config(config))
         if merged.get("second_value") not in (None, ""):
             merged["mappings"] = merged.get("second_value")
+            merged["second_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
@@ -629,12 +731,14 @@ class MergeDataOperator(BaseOperator):
     default_config = {"merge_type": "concat"}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
+        merged = dict(super()._resolve_config(config))
         # second_value / third_value 为显式顺序槽位输入，应覆盖默认值
         if merged.get("second_value") not in (None, ""):
             merged["merge_type"] = merged.get("second_value")
+            merged["second_value"] = None
         if merged.get("third_value") not in (None, ""):
             merged["join_key"] = merged.get("third_value")
+            merged["third_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
@@ -784,9 +888,10 @@ class FlattenDataOperator(BaseOperator):
     default_config = {}
 
     def _resolve_config(self, config):
-        merged = super()._resolve_config(config)
+        merged = dict(super()._resolve_config(config))
         if merged.get("second_value") not in (None, ""):
             merged["nested_field"] = merged.get("second_value")
+            merged["second_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):

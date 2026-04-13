@@ -8,8 +8,8 @@ class ErrorCode(IntEnum):
     # 1xxx 数据/配置
     DATA_NOT_FOUND = 1001
     CONFIG_MISSING = 1002
-    CONFIG_TYPE_ERROR = 1003
-    CONFIG_FORMAT_ERROR = 1003  # backward-compatible alias
+    CONFIG_TYPE_ERROR = 1003  # JSON Schema / 类型校验失败（如类型、required、additionalProperties）
+    CONFIG_FORMAT_ERROR = 1008  # 非法旧输入键
     CONFIG_INVALID = 1004
     DEPENDENCY_ERROR = 1005
     VERSION_UNSUPPORTED = 1006
@@ -29,6 +29,13 @@ class ErrorCode(IntEnum):
     RUNTIME_ERROR = 5001
     EXTERNAL_SERVICE_ERROR = 5002  # 如 ES 连接/查询失败
     UNKNOWN = 5999
+
+
+# 调用方依赖「JSON Schema 失败」与「非法旧输入键」可用不同数值区分；若合并为同值须同步改契约与全部测试。
+if int(ErrorCode.CONFIG_TYPE_ERROR) == int(ErrorCode.CONFIG_FORMAT_ERROR):
+    raise RuntimeError(
+        "ErrorCode.CONFIG_TYPE_ERROR and CONFIG_FORMAT_ERROR must not share the same integer"
+    )
 
 
 class OperatorException(Exception):

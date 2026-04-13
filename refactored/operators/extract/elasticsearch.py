@@ -52,10 +52,13 @@ class ESExtractOperator(BaseOperator):
         # first_value -> index, second_value -> table(字段列表), third_value -> query
         if c.get("index") in (None, "") and c.get("first_value") not in (None, ""):
             c["index"] = c.get("first_value")
+            c["first_value"] = None
         if c.get("table") in (None, "") and c.get("second_value") not in (None, ""):
             c["table"] = c.get("second_value")
+            c["second_value"] = None
         if c.get("query") in (None, "") and isinstance(c.get("third_value"), dict):
             c["query"] = c.get("third_value")
+            c["third_value"] = None
         return c
 
     def execute(

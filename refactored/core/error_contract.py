@@ -9,6 +9,7 @@ ERROR_CODE_TAXONOMY: Dict[int, str] = {
     int(ErrorCode.DATA_NOT_FOUND): "data_not_found",
     int(ErrorCode.CONFIG_MISSING): "config_missing",
     int(ErrorCode.CONFIG_TYPE_ERROR): "config_type_error",
+    int(ErrorCode.CONFIG_FORMAT_ERROR): "config_format_error",
     int(ErrorCode.CONFIG_INVALID): "config_invalid",
     int(ErrorCode.DEPENDENCY_ERROR): "dependency_error",
     int(ErrorCode.VERSION_UNSUPPORTED): "version_unsupported",

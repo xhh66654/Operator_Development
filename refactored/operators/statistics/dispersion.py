@@ -1,11 +1,11 @@
-"""统计类：离散程度、离均差平方和（与 stats 同包，依赖 _collect_values）。"""
+"""统计类：离散程度、离均差平方和（与 stats 同包）。"""
 import statistics
 from typing import Any, Dict
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from .stats import (
-    _collect_values,
     _collect_values_first_only,
+    _number_list_from_first_value_only,
     _resolve_first_second_values_weights,
     _weights_flat,
 )
@@ -15,7 +15,11 @@ from .stats import (
 class DispersionOperator(BaseOperator):
     """离散程度：标准差与均值之比（变异系数同类）。"""
     name = "dispersion"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}}}
+    config_schema = {
+        "type": "object",
+        "required": ["first_value"],
+        "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}},
+    }
     default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
@@ -24,7 +28,7 @@ class DispersionOperator(BaseOperator):
         return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _number_list_from_first_value_only(data, config, context, operator=self.name)
         if len(values) < 2:
             return 0.0
         mean_val = statistics.mean(values)
@@ -38,7 +42,11 @@ class DispersionOperator(BaseOperator):
 class SumOfSquaredDeviationsOperator(BaseOperator):
     """离均差平方和：Σ(xi - x̄)²"""
     name = "sum_of_squared_deviations"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}}}
+    config_schema = {
+        "type": "object",
+        "required": ["first_value"],
+        "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}},
+    }
     default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
@@ -47,7 +55,7 @@ class SumOfSquaredDeviationsOperator(BaseOperator):
         return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
+        values = _number_list_from_first_value_only(data, config, context, operator=self.name)
         if not values:
             return 0.0
         mean_val = statistics.mean(values)
@@ -58,10 +66,14 @@ class SumOfSquaredDeviationsOperator(BaseOperator):
 class WeightedSumOfSquaredDeviationsOperator(BaseOperator):
     """加权离均差平方和：Σ(w * (xi - x̄)²)"""
     name = "weighted_sum_of_squared_deviations"
-    config_schema = {"type": "object", "properties": {
-        "weights": {"type": "array"},
-        "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {},
-    }}
+    config_schema = {
+        "type": "object",
+        "required": ["first_value"],
+        "properties": {
+            "weights": {"type": "array"},
+            "first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {},
+        },
+    }
     default_config = {"weights": []}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}

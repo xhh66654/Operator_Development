@@ -155,23 +155,54 @@ def _resolve_first_second_values_weights(merged: Dict[str, Any]) -> Dict[str, An
     out = dict(merged)
     # second_value 为显式顺序槽位输入，应覆盖默认/具名 weights
     out["weights"] = sv
+    out["second_value"] = None
     return out
 
 
-def _collect_values_first_only(data: Dict, config: Dict, context: ExecutionContext, *, operator: str) -> List[float]:
+def _number_list_from_first_value_only(
+    data: Dict, config: Dict, context: ExecutionContext, *, operator: str
+) -> List[float]:
     """
-    加权类算子专用：仅从 first_value 收集样本，避免 second_value（权重）被当作样本拼接。
+    仅从 first_value 解析数值列表（可空列表），禁止多顺序槽位合并。
+    用于加权类、离散类等：避免 second_value（权重/目标等）被 _collect_values 拼进样本。
     """
     fv = config.get("first_value")
+    if fv in (None, ""):
+        raise OperatorException(
+            f"{operator} 必须配置 first_value 作为样本来源，不支持多顺序槽位合并样本",
+            code=ErrorCode.CONFIG_MISSING,
+            operator=operator,
+            config=config,
+        )
     raw = get_value(data, fv, context)
     if raw is None:
         raise OperatorException(
-            f"{operator} 未取到任何观测值（first_value 为空或引用缺失）",
+            f"{operator} 未取到样本（first_value 引用缺失或为空）",
             code=ErrorCode.DATA_NOT_FOUND,
             operator=operator,
             config=config,
         )
     return _ensure_number_list(raw)
+
+
+def _collect_values_first_only(data: Dict, config: Dict, context: ExecutionContext, *, operator: str) -> List[float]:
+    """加权类算子：同 `_number_list_from_first_value_only`。"""
+    return _number_list_from_first_value_only(data, config, context, operator=operator)
+
+
+def _ensure_sample_from_first_value_only(
+    data: Dict, config: Dict, context: ExecutionContext, *, operator: str
+) -> List[float]:
+    """分位数等：first_value 样本且至少含一个数值。"""
+    values = _number_list_from_first_value_only(data, config, context, operator=operator)
+    if not values:
+        raise OperatorException(
+            f"{operator} 样本解析后无任何数值",
+            code=ErrorCode.DATA_NOT_FOUND,
+            operator=operator,
+            config=config,
+        )
+    return values
 
 
 def _list_element_count(raw: Any) -> float:
@@ -295,53 +326,11 @@ def _decline_rate_pairwise(
 
 @OperatorRegistry.register("arithmetic_mean")
 class ArithmeticMeanOperator(BaseOperator):
-    """
-    算术平均值算子：计算数据的算术平均数
-    
-    功能说明：
-    - 计算所有数值的和除以数值个数
-    - 最常见的平均值计算方法
-    
-    计算逻辑：
-    result = (x1 + x2 + ... + xn) / n
-    例: [10, 20, 30] 的算术平均值 = 60/3 = 20
-    
-    配置参数：
-    - first_value/second_value/third_value...：按顺序提供样本来源（字段名、${step_key} 或字面量）
-    
-    输入数据格式：
-    base_data: {
-        "score1": 90,
-        "score2": 85,
-        "score3": 95
-    }
-    
-    配置示例：
-    {
-        "operator": "arithmetic_mean",
-        "config": {
-            "first_value": "score1",
-            "second_value": "score2",
-            "third_value": "score3"
-        }
-    }
-    
-    输出格式：
-    90.0 (数值)
-    
-    数据支持：
-    - 单值: 100
-    - 数组: [90, 85, 95]
-    - JSON数组字符串: "[90, 85, 95]"
-    
-    特殊情况：
-    - 空数据返回 0.0
-    - 支持多个数组，自动展开合并
-    
-    使用场景：
-    - 学生成绩平均分
-    - 销售数据平均值
-    - 性能指标平均
+    """算术平均数 (arithmetic_mean)
+    计算逻辑：所有样本数值之和除以样本数量（最常用的平均值）
+    数学公式：μ = Σxi / n
+    数据来源：first_value（样本集合）
+    特殊处理：无数据时返回 0.0
     """
     name = "arithmetic_mean"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
@@ -361,7 +350,12 @@ class ArithmeticMeanOperator(BaseOperator):
 
 @OperatorRegistry.register("harmonic_mean")
 class HarmonicMeanOperator(BaseOperator):
-    """调和平均数：n / (1/x1 + 1/x2 + … + 1/xn)。常用于平均速率、平均价格。"""
+    """调和平均数 (harmonic_mean)
+    计算逻辑：样本数量的倒数除以各数值倒数之和（常用于速率、密度平均）
+    数学公式：H = n / Σ(1/xi)
+    数据来源：first_value（样本集合）
+    异常处理：样本中包含 0 时抛出 CALC_LOGIC_ERROR
+    """
     name = "harmonic_mean"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
     default_config = {}
@@ -383,7 +377,12 @@ class HarmonicMeanOperator(BaseOperator):
 
 @OperatorRegistry.register("geometric_mean")
 class GeometricMeanOperator(BaseOperator):
-    """几何平均数：(x1*x2*…*xn)^(1/n)。常用于增长率、比例的平均。"""
+    """几何平均数 (geometric_mean)
+        计算逻辑：n个数值乘积的n次方根（常用于增长率、指数平均）
+        数学公式：G = (Πxi)^(1/n) = exp(Σln(xi) / n)
+        数据来源：first_value（样本集合）
+        异常处理：样本中包含非正数（<=0）时抛出 CALC_LOGIC_ERROR
+        """
     name = "geometric_mean"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
     default_config = {}
@@ -405,7 +404,12 @@ class GeometricMeanOperator(BaseOperator):
 
 @OperatorRegistry.register("weighted_average")
 class WeightedAverageOperator(BaseOperator):
-    """加权平均值：(w1*x1 + w2*x2 + … + wn*xn) / (w1+w2+…+wn)。"""
+    """加权平均值 (weighted_average)
+    计算逻辑：各数值乘以对应权重后的总和除以权重总和
+    数学公式：Sum(wi * xi) / Sum(wi)
+    数据来源：first_value（样本集合）；权重来源：weights（或兼容 second_value）
+    异常处理：未获取到观测值时抛出 DATA_NOT_FOUND；权重和为 0 时返回 0.0
+    """
     name = "weighted_average"
     config_schema = {"type": "object", "properties": {
         "weights": {"type": "array"},
@@ -438,46 +442,11 @@ class WeightedAverageOperator(BaseOperator):
 
 @OperatorRegistry.register("median")
 class MedianOperator(BaseOperator):
-    """
-    中位数算子：计算数据的中位数
-    
-    功能说明：
-    - 将数据从小到大排序，取中间值
-    - 不受极端值影响，比平均值更稳健
-    
-    计算逻辑：
-    - 数据个数为奇数: 取中间值
-    - 数据个数为偶数: 取中间两值的平均
-    例: [1, 3, 5] → 3, [1, 2, 3, 4] → 2.5
-    
-    配置参数：
-    - first_value/second_value/third_value...：按顺序提供样本来源（字段名、${step_key} 或字面量）
-    
-    输入数据格式：
-    base_data: {
-        "values": [95, 85, 90, 100, 88]
-    }
-    
-    配置示例：
-    {
-        "operator": "median",
-        "config": {
-            "first_value": "values"
-        }
-    }
-    
-    输出格式：
-    90.0 (数值)
-    
-    vs 平均值：
-    - 数据: [10, 20, 30, 40, 1000]
-    - 平均值: 220.0
-    - 中位数: 30.0 (更能代表数据中心)
-    
-    使用场景：
-    - 房价中位数（避免极端房价影响）
-    - 收入中位数分析
-    - 数据质量评估
+    """中位数 (median)
+    计算逻辑：将样本排序后位于中间位置的数值（50%分位点）
+    数学公式：statistics.median(values)
+    数据来源：first_value（样本集合）
+    异常处理：未收集到任何数值时抛出 DATA_NOT_FOUND
     """
     name = "median"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
@@ -503,6 +472,12 @@ class MedianOperator(BaseOperator):
 
 @OperatorRegistry.register("mode")
 class ModeOperator(BaseOperator):
+    """众数
+    计算逻辑：统计样本中出现频率最高的数值
+    返回规则：若唯一众数则返回该值；若存在多个并列众数则返回列表
+    数据来源：first_value 至 tenth_value（支持多字段合并统计）
+    异常处理：未收集到任何数值时抛出 DATA_NOT_FOUND
+    """
     name = "mode"
     config_schema = {"type": "object", "properties": {
         "first_value": {},
@@ -542,6 +517,12 @@ class ModeOperator(BaseOperator):
 
 @OperatorRegistry.register("range")
 class RangeOperator(BaseOperator):
+    """极差
+    计算逻辑：样本中的最大值减去最小值
+    数学公式：max(values) - min(values)
+    数据来源：first_value（样本集合）
+    特殊处理：无数据时返回 0.0
+    """
     name = "range"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
     default_config = {}
@@ -560,6 +541,12 @@ class RangeOperator(BaseOperator):
 
 @OperatorRegistry.register("std_dev")
 class StdDevOperator(BaseOperator):
+    """标准差
+    计算逻辑：衡量样本数值的离散程度（基于样本标准差，使用贝塞尔校正）
+    数学公式：sqrt(sum((x - mean)^2) / (n - 1))
+    数据来源：first_value（样本集合）
+    特殊处理：样本数 < 2 时返回 None（无法计算无偏估计）
+    """
     name = "std_dev"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
     default_config = {}
@@ -578,6 +565,12 @@ class StdDevOperator(BaseOperator):
 
 @OperatorRegistry.register("variance")
 class VarianceOperator(BaseOperator):
+    """方差
+    计算逻辑：衡量样本数值的离散程度（基于样本方差，使用贝塞尔校正）
+    数学公式：s² = Σ(xi - x̄)² / (n - 1)
+    数据来源：first_value（样本集合）
+    特殊处理：样本数 < 2 时返回 None（无法计算无偏估计）
+    """
     name = "variance"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
     default_config = {}
@@ -596,6 +589,11 @@ class VarianceOperator(BaseOperator):
 
 @OperatorRegistry.register("growth_rate")
 class GrowthRateOperator(BaseOperator):
+    """增长率
+    计算逻辑：(现期值 - 基期值) / 基期值，支持标量或向量批量计算
+    参数兼容：old_value 兼容 first_value（基期）；new_value 兼容 second_value（现期）
+    数据来源：old_value/first_value（基期）；new_value/second_value（现期）
+    """
     name = "growth_rate"
     config_schema = {
         "type": "object",
@@ -612,11 +610,13 @@ class GrowthRateOperator(BaseOperator):
     output_spec = None
 
     def _resolve_config(self, config):
-        c = super()._resolve_config(config)
+        c = dict(super()._resolve_config(config))
         if c.get("old_value") in (None, "") and c.get("first_value") not in (None, ""):
             c["old_value"] = c.get("first_value")
+            c["first_value"] = None
         if c.get("new_value") in (None, "") and c.get("second_value") not in (None, ""):
             c["new_value"] = c.get("second_value")
+            c["second_value"] = None
         return c
 
     def execute(self, data, config, context: ExecutionContext):
@@ -633,6 +633,11 @@ class GrowthRateOperator(BaseOperator):
 
 @OperatorRegistry.register("decline_rate")
 class DeclineRateOperator(BaseOperator):
+    """下降率
+    计算逻辑：(基期值 - 现期值) / 基期值，支持标量或向量批量计算
+    参数兼容：old_value 兼容 first_value（基期）；new_value 兼容 second_value（现期）
+    数据来源：old_value/first_value（基期）；new_value/second_value（现期）
+    """
     name = "decline_rate"
     config_schema = {
         "type": "object",
@@ -648,11 +653,13 @@ class DeclineRateOperator(BaseOperator):
     output_spec = None
 
     def _resolve_config(self, config):
-        c = super()._resolve_config(config)
+        c = dict(super()._resolve_config(config))
         if c.get("old_value") in (None, "") and c.get("first_value") not in (None, ""):
             c["old_value"] = c.get("first_value")
+            c["first_value"] = None
         if c.get("new_value") in (None, "") and c.get("second_value") not in (None, ""):
             c["new_value"] = c.get("second_value")
+            c["second_value"] = None
         return c
 
     def execute(self, data, config, context: ExecutionContext):
@@ -669,7 +676,13 @@ class DeclineRateOperator(BaseOperator):
 
 @OperatorRegistry.register("percentage")
 class PercentageOperator(BaseOperator):
-    """百分比计算：part / total * 100（列表按元素求和，见 `to_number`）。"""
+    """百分比
+        计算逻辑：部分数值除以总体数值，结果以百分比形式返回
+        数学公式：(part / total) * 100
+        数值处理：若输入为列表，则先求和再计算（基于 to_number 逻辑）
+        数据来源：first_value（部分）；second_value（总体）
+        异常处理：分母（总体数值）为 0 时抛出 CALC_LOGIC_ERROR
+        """
     name = "percentage"
     config_schema = {
         "type": "object",
@@ -699,7 +712,13 @@ class PercentageOperator(BaseOperator):
 
 @OperatorRegistry.register("percentage_by_count")
 class PercentageByCountOperator(BaseOperator):
-    """条数占比：len(part) / len(total) * 100（非列表视为 1 条，None 为 0 条）。"""
+    """条数占比
+    计算逻辑：部分条数除以总条数，结果以百分比形式返回
+    数学公式：(count(part) / count(total)) * 100
+    计数规则：非列表视为 1 条，None 视为 0 条
+    数据来源：first_value（部分）；second_value（整体）
+    异常处理：分母（整体条数）为 0 时抛出 CALC_LOGIC_ERROR
+    """
     name = "percentage_by_count"
     config_schema = {
         "type": "object",
@@ -728,6 +747,12 @@ class PercentageByCountOperator(BaseOperator):
 
 @OperatorRegistry.register("weighted_sum_squares")
 class WeightedSumSquaresOperator(BaseOperator):
+    """加权平方和
+    计算逻辑：(样本1² × 权重1) + (样本2² × 权重2) + ...
+    数学公式：Sum(weights[i] * values[i]²)
+    权重顺序：按位置一一对应（第1个权重对应第1个样本，第2个对应第2个...）
+    数据来源：first_value（样本集合）；权重来源：weights（或兼容 second_value）
+    """
     name = "weighted_sum_squares"
     config_schema = {"type": "object", "properties": {
         "weights": {"type": "array"},
@@ -752,6 +777,11 @@ class WeightedSumSquaresOperator(BaseOperator):
 
 @OperatorRegistry.register("sum_squares")
 class SumSquaresOperator(BaseOperator):
+    """平方和
+    计算逻辑：遍历样本中的每个数值进行平方运算，最后求和
+    数学公式：Sum(x^2)
+    数据来源：first_value（样本集合）
+    """
     name = "sum_squares"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
     default_config = {}
@@ -770,8 +800,18 @@ class SumSquaresOperator(BaseOperator):
 
 @OperatorRegistry.register("percentile")
 class PercentileOperator(BaseOperator):
+    """百分位数
+    数据来源：first_value（样本集合）；分位点参数：second_value（兼容旧参数，映射为 percentile）
+    计算逻辑：计算样本在指定分位点（0~100）上的数值
+    手动模式：线性插值法（基于索引 k = (n-1) * p / 100）
+    异常处理：分位点必须为数值且在 0~100 范围内
+    """
     name = "percentile"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "percentile": {}}}
+    config_schema = {
+        "type": "object",
+        "required": ["first_value"],
+        "properties": {"first_value": {}, "second_value": {}, "percentile": {}},
+    }
     # 不在 default_config 里写 percentile：否则合并后始终为 50，second_value 无法写入 percentile
     default_config = {}
     input_spec = {"type": "table"}
@@ -782,24 +822,11 @@ class PercentileOperator(BaseOperator):
         if merged.get("percentile") in (None, "") and merged.get("second_value") not in (None, ""):
             merged = dict(merged)
             merged["percentile"] = merged.get("second_value")
-            # 已作为分位点，勿再被 _collect_values 当成样本槽位
             merged["second_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
-        # 优先 first_value：避免与非严格算子一样把 second_value 当「第二列数据」收集
-        if config.get("first_value") not in (None, ""):
-            raw = get_value(data, config.get("first_value"), context)
-            values = _ensure_number_list(raw)
-        else:
-            values = _collect_values(data, config, context)
-        if not values:
-            raise OperatorException(
-                "percentile 未收集到任何数值（请检查 first_value/second_value/... 是否能取到值）",
-                code=ErrorCode.DATA_NOT_FOUND,
-                operator=self.name,
-                config=config,
-            )
+        values = _ensure_sample_from_first_value_only(data, config, context, operator=self.name)
         p_raw = config.get("percentile", 50)
         p = safe_convert_to_number(p_raw)
         if p is None:
@@ -828,6 +855,12 @@ class PercentileOperator(BaseOperator):
 
 @OperatorRegistry.register("cv")
 class CvOperator(BaseOperator):
+    """变异系数
+    计算逻辑：标准差除以平均值，结果以百分比形式返回
+    标准差：statistics.stdev(values)（基于样本的标准差）
+    平均值：statistics.mean(values)（算术平均值）
+    特殊处理：样本数 < 2 或 平均值 == 0 时返回 0.0（避免除零或计算错误）
+    """
     name = "cv"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
     default_config = {}
@@ -851,8 +884,18 @@ class CvOperator(BaseOperator):
 
 @OperatorRegistry.register("quartiles")
 class QuartilesOperator(BaseOperator):
+    """四分位数
+    计算逻辑：返回包含第一四分位数、中位数、第三四分位数的列表 [Q1, Q2, Q3]
+    Q1：np.percentile(values, 25) 或 _interp(0.25)（第 25 百分位数）
+    Q2：statistics.median(s)（第 50 百分位数/中位数，NumPy 模式下为 percentile 50）
+    Q3：np.percentile(values, 75) 或 _interp(0.75)（第 75 百分位数）
+    """
     name = "quartiles"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    config_schema = {
+        "type": "object",
+        "required": ["first_value"],
+        "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}},
+    }
     default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "list"}
@@ -861,9 +904,7 @@ class QuartilesOperator(BaseOperator):
         return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
-        if not values:
-            return [0.0, 0.0, 0.0]
+        values = _ensure_sample_from_first_value_only(data, config, context, operator=self.name)
         if _HAS_NUMPY:
             q1, q2, q3 = np.percentile(values, [25, 50, 75])
             return [float(q1), float(q2), float(q3)]
@@ -884,8 +925,17 @@ class QuartilesOperator(BaseOperator):
 
 @OperatorRegistry.register("iqr")
 class IqrOperator(BaseOperator):
+    """四分位距
+    计算逻辑：第三四分位数（Q3）减去第一四分位数（Q1）
+    Q1：np.percentile(values, 25) （第 25 百分位数）
+    Q3：np.percentile(values, 75) （第 75 百分位数）
+    """
     name = "iqr"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}}}
+    config_schema = {
+        "type": "object",
+        "required": ["first_value"],
+        "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "fifth_value": {}},
+    }
     default_config = {}
     input_spec = {"type": "table"}
     output_spec = {"type": "scalar"}
@@ -894,9 +944,7 @@ class IqrOperator(BaseOperator):
         return super()._resolve_config(config)
 
     def execute(self, data, config, context: ExecutionContext):
-        values = _collect_values(data, config, context)
-        if not values:
-            return 0.0
+        values = _ensure_sample_from_first_value_only(data, config, context, operator=self.name)
         s = sorted(values)
         n = len(s)
 
@@ -915,6 +963,12 @@ class IqrOperator(BaseOperator):
 
 @OperatorRegistry.register("weighted_variance")
 class WeightedVarianceOperator(BaseOperator):
+    """加权方差 (weighted_variance)
+    计算逻辑：各数值与加权均值差的平方，乘以权重后求和，再除以权重总和
+    数学公式：σ² = Σ(wi * (xi - μ)²) / Σwi
+    数据来源：first_value（样本集合）；权重来源：weights（或兼容 second_value）
+    特殊处理：无数据或权重和为 0 时返回 0.0
+    """
     name = "weighted_variance"
     config_schema = {"type": "object", "properties": {
         "weights": {"type": "array"},
@@ -943,7 +997,12 @@ class WeightedVarianceOperator(BaseOperator):
 
 @OperatorRegistry.register("weighted_std")
 class WeightedStdOperator(BaseOperator):
-    """加权标准差::√[Σ(wi*(vi - μ)²) / Σwi]，其中μ=Σ(wi*vi)/Σwi。"""
+    """加权标准差 (weighted_std)
+    计算逻辑：加权方差的算术平方根
+    数学公式：σ = √[Σ(wi * (xi - μ)²) / Σwi]
+    数据来源：first_value（样本集合）；权重来源：weights（或兼容 second_value）
+    特殊处理：无数据或权重和为 0 时返回 0.0
+    """
     name = "weighted_std"
     config_schema = {"type": "object", "properties": {
         "weights": {"type": "array"},
@@ -973,7 +1032,12 @@ class WeightedStdOperator(BaseOperator):
 
 @OperatorRegistry.register("trimmed_mean")
 class TrimmedMeanOperator(BaseOperator):
-    """截尾均值：去掉极端值后计算平均值"""
+    """截尾均值 (trimmed_mean)
+    计算逻辑：排序后去除首尾指定比例（默认 10%）的极端值，再计算算术平均
+    数学公式：μ = Σ(sorted[k:-k]) / (n-2k)
+    数据来源：first_value（样本集合）
+    特殊处理：无数据时返回 0.0
+    """
     name = "trimmed_mean"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "trim_percent": {"type": "number"}}}
     default_config = {"trim_percent": 0.1}
@@ -998,7 +1062,11 @@ class TrimmedMeanOperator(BaseOperator):
 
 @OperatorRegistry.register("winsorized_mean")
 class WinsorizedMeanOperator(BaseOperator):
-    """缩尾均值：极端值替换为临界值后计算平均值"""
+    """缩尾均值 (winsorized_mean)
+    计算逻辑：将首尾指定比例（默认 10%）的极端值替换为临界值，再计算算术平均
+    数据来源：first_value（样本集合）
+    特殊处理：无数据时返回 0.0
+    """
     name = "winsorized_mean"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "fourth_value": {}, "winsor_percent": {"type": "number"}}}
     default_config = {"winsor_percent": 0.1}
@@ -1028,7 +1096,12 @@ class WinsorizedMeanOperator(BaseOperator):
 
 @OperatorRegistry.register("frequency")
 class FrequencyOperator(BaseOperator):
-    """频数：统计值在列表中出现的次数"""
+    """频数 (frequency)
+    计算逻辑：统计目标值在列表中出现的次数
+    数学公式：Count(x == target)
+    数据来源：first_value（列表）；target_value（目标值）
+    参数兼容：target_value 兼容 second_value
+    """
     name = "frequency"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "target_value": {}}}
     default_config = {}
@@ -1036,9 +1109,10 @@ class FrequencyOperator(BaseOperator):
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        c = super()._resolve_config(config)
+        c = dict(super()._resolve_config(config))
         if c.get("target_value") in (None, "") and c.get("second_value") not in (None, ""):
             c["target_value"] = c.get("second_value")
+            c["second_value"] = None
         return c
 
     def execute(self, data, config, context: ExecutionContext):
@@ -1051,7 +1125,13 @@ class FrequencyOperator(BaseOperator):
 
 @OperatorRegistry.register("relative_frequency")
 class RelativeFrequencyOperator(BaseOperator):
-    """频率：值出现的次数 / 总数"""
+    """频率 (relative_frequency)
+    计算逻辑：目标值出现次数除以列表总长度
+    数学公式：P = Count(x == target) / N
+    参数兼容：target_value 兼容 second_value
+    数据来源：first_value（列表）；target_value（目标值）
+    特殊处理：列表为空时返回 0.0
+    """
     name = "relative_frequency"
     config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "target_value": {}}}
     default_config = {}
@@ -1059,9 +1139,10 @@ class RelativeFrequencyOperator(BaseOperator):
     output_spec = {"type": "scalar"}
 
     def _resolve_config(self, config):
-        c = super()._resolve_config(config)
+        c = dict(super()._resolve_config(config))
         if c.get("target_value") in (None, "") and c.get("second_value") not in (None, ""):
             c["target_value"] = c.get("second_value")
+            c["second_value"] = None
         return c
 
     def execute(self, data, config, context: ExecutionContext):

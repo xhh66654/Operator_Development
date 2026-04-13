@@ -117,15 +117,18 @@ class TimeAddOperator(BaseOperator):
     default_config = {}
 
     def _resolve_config(self, config):
-        c = super()._resolve_config(config)
+        c = dict(super()._resolve_config(config))
         if c.get("base_time") in (None, ""):
             if c.get("first_value") not in (None, ""):
                 c["base_time"] = c.get("first_value")
+                c["first_value"] = None
         if c.get("duration_seconds") in (None, ""):
             if c.get("second_value") not in (None, ""):
                 c["duration_seconds"] = c.get("second_value")
+                c["second_value"] = None
         if c.get("duration") in (None, "") and c.get("third_value") not in (None, ""):
             c["duration"] = c.get("third_value")
+            c["third_value"] = None
         return c
 
     def execute(self, data, config, context: ExecutionContext):
@@ -195,24 +198,28 @@ class TimeSubtractOperator(BaseOperator):
     default_config = {}
 
     def _resolve_config(self, config):
-        c = super()._resolve_config(config)
+        c = dict(super()._resolve_config(config))
         if c.get("end_time") in (None, ""):
             if c.get("first_value") not in (None, ""):
                 c["end_time"] = c.get("first_value")
+                c["first_value"] = None
         if c.get("start_time") in (None, ""):
             if c.get("second_value") not in (None, ""):
                 c["start_time"] = c.get("second_value")
+                c["second_value"] = None
         if c.get("base_time") in (None, ""):
             for k in ("third_value",):
                 v = c.get(k)
                 if v not in (None, ""):
                     c["base_time"] = v
+                    c["third_value"] = None
                     break
         if c.get("duration_seconds") in (None, ""):
             for k in ("fourth_value",):
                 v = c.get(k)
                 if v not in (None, ""):
                     c["duration_seconds"] = v
+                    c["fourth_value"] = None
                     break
         return c
 

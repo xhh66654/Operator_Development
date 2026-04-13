@@ -49,15 +49,17 @@ class PrecisionRoundOperator(BaseOperator):
     default_config = {}
 
     def _resolve_config(self, config):
-        c = super()._resolve_config(config)
+        c = dict(super()._resolve_config(config))
         if c.get("decimal_places") in (None, ""):
             for k in ("second_value",):
                 v = c.get(k)
                 if v not in (None, ""):
                     c["decimal_places"] = v
+                    c["second_value"] = None
                     break
         if c.get("expression") in (None, "") and c.get("third_value") not in (None, ""):
             c["expression"] = c.get("third_value")
+            c["third_value"] = None
         return c
 
     def execute(self, data, config, context: ExecutionContext):
