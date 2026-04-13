@@ -4,7 +4,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...core.exceptions import OperatorException, ErrorCode
-from .._common import normalize_config_input, rows_to_field_list_dict
+from .._common import normalize_config_input
 
 
 def _clean_nan(records: List[Dict]) -> List[Dict]:
@@ -66,14 +66,24 @@ class ExtractFromCsvOperator(BaseOperator):
         if c.get("file_path") in (None, "") and c.get("first_value") not in (None, ""):
             c["file_path"] = c.get("first_value")
             c["first_value"] = None
-        if c.get("encoding") in (None, "") and c.get("second_value") not in (None, ""):
-            c["encoding"] = c.get("second_value")
+        # 主路径：first_value=路径，second_value=要读取的列名数组（不填则读全列）
+        if c.get("selected_columns") in (None, "") and c.get("second_value") not in (None, ""):
+            sv = c.get("second_value")
+            if isinstance(sv, (list, tuple)):
+                c["selected_columns"] = [str(x) for x in sv if str(x).strip()]
+            elif isinstance(sv, str) and sv.strip():
+                c["selected_columns"] = [sv.strip()]
             c["second_value"] = None
-        if c.get("delimiter") in (None, "") and c.get("third_value") not in (None, ""):
-            c["delimiter"] = c.get("third_value")
+        # 具名键优先；仅当未显式配置 encoding 时，才允许旧顺序槽 third_value 表示编码
+        if c.get("encoding") in (None, "") and c.get("third_value") not in (None, ""):
+            tv = c.get("third_value")
+            if isinstance(tv, str) and tv.strip():
+                c["encoding"] = tv.strip()
             c["third_value"] = None
-        if c.get("selected_columns") in (None, "") and c.get("fourth_value") not in (None, ""):
-            c["selected_columns"] = c.get("fourth_value")
+        if c.get("delimiter") in (None, "") and c.get("fourth_value") not in (None, ""):
+            fv = c.get("fourth_value")
+            if isinstance(fv, str) and fv:
+                c["delimiter"] = fv
             c["fourth_value"] = None
         if c.get("skip_rows") in (None, "") and c.get("fifth_value") not in (None, ""):
             c["skip_rows"] = c.get("fifth_value")
@@ -103,4 +113,4 @@ class ExtractFromCsvOperator(BaseOperator):
                 df = df[available]
         if config.get("return_columns_only"):
             return list(df.columns.tolist())
-        return rows_to_field_list_dict(_clean_nan(df.to_dict("records")))
+        return _clean_nan(df.to_dict("records"))

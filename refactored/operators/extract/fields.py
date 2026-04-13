@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...utils import extract_field_value
-from .._common import _ctx, normalize_config_input, rows_to_field_list_dict
+from .._common import _ctx, column_dict_to_records, normalize_config_input
 
 
 def clean_nan_records(records: List[Dict]) -> List[Dict]:
@@ -34,13 +34,19 @@ class ExtractOnlyOperator(BaseOperator):
             return None
         raw = extract_field_value(data, field, _ctx(context))
         if raw is None:
-            return [{}]
+            return []
         if isinstance(raw, dict) and raw and all(isinstance(v, list) for v in raw.values()):
-            return [raw]
-        if isinstance(raw, list) and raw and isinstance(raw[0], dict) and not (
-            len(raw) == 1 and raw[0] and all(isinstance(v, list) for v in raw[0].values())
+            return column_dict_to_records(raw)
+        if (
+            isinstance(raw, list)
+            and len(raw) == 1
+            and isinstance(raw[0], dict)
+            and raw[0]
+            and all(isinstance(v, list) for v in raw[0].values())
         ):
-            return rows_to_field_list_dict(clean_nan_records(raw))
+            return column_dict_to_records(raw[0])
+        if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+            return clean_nan_records(raw)
         out_key = config.get("output_key")
         if not out_key and isinstance(field, str):
             fk = field.strip()
@@ -55,4 +61,4 @@ class ExtractOnlyOperator(BaseOperator):
         else:
             out_key = out_key or "value"
         vals = raw if isinstance(raw, list) else [raw]
-        return [{str(out_key): vals}]
+        return [{str(out_key): v} for v in vals]

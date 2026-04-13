@@ -2,6 +2,7 @@
 
 - ``reasoningDataList`` 每项：``{ reasoningId, steps: [...] }``，``steps`` 对应该项下各指标类型节点。
 - 仅输出含结果的子树；同级 ``steps`` 若为顺序结构（子项均有 result 且无嵌套 steps），只保留最后一步。
+  例外：父节点若带 ``operator_key``（如 ``add``）且非叶子指标，则视为多依赖分支，**不**做同级折叠，避免误吞容器节点（如 ``610111``）。
 """
 from __future__ import annotations
 
@@ -460,12 +461,29 @@ def _jsonable(x: Any) -> Any:
         return str(x)
 
 
-def _collapse_sequential_step_results(frags: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _should_collapse_sequential_sibling_frags(parent: Dict[str, Any]) -> bool:
+    """
+    顺序链折叠仅适用于「线性算子链」父节点。
+    带 operator_key 的复合算子（如 add）下多个子节点往往是并行依赖，折叠会误删分支（如容器 610111）。
+    """
+    parent = normalize_tree_node(parent)
+    if _is_leaf_metric(parent):
+        return True
+    if not str(parent.get("operator_key") or parent.get("operator") or "").strip():
+        return True
+    return False
+
+
+def _collapse_sequential_step_results(
+    frags: List[Dict[str, Any]], *, parent: Dict[str, Any]
+) -> List[Dict[str, Any]]:
     """
     同一父节点下 ``steps`` 子项若为顺序结构：每项均有 ``result`` 且无嵌套 ``steps``，
     则只保留最后一步（避免算子链每层全量展开）。
     """
     if len(frags) <= 1:
+        return frags
+    if not _should_collapse_sequential_sibling_frags(parent):
         return frags
     if all("result" in f and not f.get("steps") for f in frags):
         return [frags[-1]]
@@ -549,7 +567,7 @@ def build_result_tree(orig_node: Any, ctx: ExecutionContext, path: str = "0") ->
         if cf:
             child_frags.append(cf)
 
-    child_frags = _collapse_sequential_step_results(child_frags)
+    child_frags = _collapse_sequential_step_results(child_frags, parent=orig_node)
 
     raw_id = orig_node.get("node_id")
     if raw_id is None or str(raw_id).strip() == "":

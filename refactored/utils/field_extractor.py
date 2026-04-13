@@ -73,6 +73,11 @@ def extract_field_value(
     列名引用在「列包」与「行列表」两种上一步输出上一致：均得到该列的取值数组（行序一致）。
     若 data 为已解析过的结构，不会重复解析。
     """
+    # DAG 等会在执行前把 "${step}" 展开为行表/列包等字面量；此时 field_name 非 str，不得再走
+    # 「field_name in obj」分支（list 不可哈希，会触发 unhashable type: 'list'）。
+    if isinstance(field_name, (list, dict)):
+        return field_name
+
     cref = _parse_context_ref(field_name) if context is not None else None
     if cref is not None:
         step_key, subfield = cref

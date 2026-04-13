@@ -3,7 +3,7 @@ from typing import Dict, List
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...core.exceptions import OperatorException, ErrorCode
-from .._common import normalize_config_input, rows_to_field_list_dict
+from .._common import normalize_config_input
 from .fields import clean_nan_records
 
 
@@ -29,9 +29,20 @@ class ExtractFromExcelOperator(BaseOperator):
 
     def _resolve_config(self, config):
         c = normalize_config_input(super()._resolve_config(config))
-        # 兼容顺序参数：first_value -> file_path
+        # 顺序槽：first_value -> file_path；second_value -> sheet_name；third_value -> selected_columns
         if c.get("file_path") in (None, "") and c.get("first_value") not in (None, ""):
             c["file_path"] = c.get("first_value")
+            c["first_value"] = None
+        if c.get("second_value") not in (None, ""):
+            c["sheet_name"] = c.get("second_value")
+            c["second_value"] = None
+        if c.get("selected_columns") in (None, "") and c.get("third_value") not in (None, ""):
+            tv = c.get("third_value")
+            if isinstance(tv, (list, tuple)):
+                c["selected_columns"] = [str(x) for x in tv if str(x).strip()]
+            elif isinstance(tv, str) and tv.strip():
+                c["selected_columns"] = [tv.strip()]
+            c["third_value"] = None
         return c
 
     def execute(self, data: Dict, config: Dict, context: ExecutionContext) -> List[Dict]:
@@ -54,4 +65,4 @@ class ExtractFromExcelOperator(BaseOperator):
                 df = df[available]
         if config.get("return_columns_only"):
             return list(df.columns.tolist())
-        return rows_to_field_list_dict(clean_nan_records(df.to_dict("records")))
+        return clean_nan_records(df.to_dict("records"))

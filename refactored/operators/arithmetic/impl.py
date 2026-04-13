@@ -1735,11 +1735,15 @@ class CosineSimilarityOperator(BaseOperator):
     计算逻辑：cos_sim(a, b) = (a·b) / (|a| × |b|)
     取值范围: [-1, 1]（1 同向，0 正交，-1 反向）
     向量须等长、模长不能为0。
+
+    配置须显式提供 ``first_value`` 与 ``second_value`` 两个槽位；不支持将两个 ``${...}`` 引用
+    写在 ``first_value`` 单数组中的旧写法。
     """
     name = "cosine_similarity"
     config_schema = {
         "type": "object",
         "additionalProperties": False,
+        "required": ["first_value", "second_value"],
         "properties": {
             "first_value": {},
             "second_value": {},
@@ -1748,8 +1752,29 @@ class CosineSimilarityOperator(BaseOperator):
     default_config = {}
 
     def execute(self, data, config, context: ExecutionContext):
-        v1 = get_value(data, config.get("first_value"), context)
-        v2 = get_value(data, config.get("second_value"), context)
+        fv_raw = config.get("first_value")
+        sv_raw = config.get("second_value")
+        if sv_raw in (None, ""):
+            raise OperatorException(
+                "cosine_similarity 必须提供 second_value（与 first_value 各表示一个向量或向量组）",
+                code=ErrorCode.CONFIG_MISSING,
+                operator=self.name,
+                config=config,
+            )
+        if (
+            isinstance(fv_raw, list)
+            and len(fv_raw) == 2
+            and all(isinstance(x, str) for x in fv_raw)
+        ):
+            raise OperatorException(
+                "cosine_similarity 不再支持 first_value 为双字符串引用数组；"
+                '请改为 {"first_value": "${step}.a", "second_value": "${step}.b"}',
+                code=ErrorCode.CONFIG_FORMAT_ERROR,
+                operator=self.name,
+                config=config,
+            )
+        v1 = get_value(data, fv_raw, context)
+        v2 = get_value(data, sv_raw, context)
 
         def _is_vector_list(x) -> bool:
             return isinstance(x, list) and len(x) > 0 and all(isinstance(row, list) for row in x)

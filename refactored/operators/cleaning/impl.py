@@ -1,6 +1,7 @@
 """数据清洗算子：filter_by_condition, select_fields, remove_duplicates, remove_nulls,
               remove_outliers, sort_data, limit_data, group_by, aggregate_by_group,
               type_conversion, rename_fields, merge_data, flatten_data"""
+import json
 import math
 import statistics
 from typing import Any, Dict, List, Union
@@ -14,8 +15,7 @@ except ImportError:
 from ...core import BaseOperator, ExecutionContext, OperatorException, OperatorRegistry
 from ...core.exceptions import ErrorCode
 from ...utils import extract_field_value
-from ...utils.field_extractor import _parse_context_ref
-from .._common import _ctx, get_value, rows_to_field_list_dict
+from .._common import _ctx, column_dict_to_records, get_value, _looks_like_context_ref
 
 
 def _to_list(raw_data: Any) -> List:
@@ -24,21 +24,39 @@ def _to_list(raw_data: Any) -> List:
     return [raw_data] if raw_data is not None else []
 
 
+def _looks_like_column_bundle(raw: Any) -> bool:
+    """列包 / 列字典：本模块不再支持，仅用于拒绝。"""
+    if isinstance(raw, dict) and (not raw or all(isinstance(v, list) for v in raw.values())):
+        return True
+    if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], dict):
+        d0 = raw[0]
+        if d0 and all(isinstance(v, list) for v in d0.values()):
+            return True
+    return False
+
+
+def _require_rows(raw: Any, *, operator: str) -> List[Any]:
+    """清洗算子输入须为行式 List[Dict]（可为空列表）；不接受列包。"""
+    if raw is None:
+        return []
+    if _looks_like_column_bundle(raw):
+        raise OperatorException(
+            f"算子 {operator} 仅支持行式 List[Dict]，不再支持列包/列字典",
+            code=ErrorCode.SCHEMA_MISMATCH,
+            operator=operator,
+        )
+    if isinstance(raw, list):
+        return raw
+    return [raw]
+
+
 def _is_columns_dict(x: Any) -> bool:
-    """
-    提取类算子输出解包后的列字典形态：
-    { "fieldA": [v1,v2,...], "fieldB": [v1,v2,...] }
-    """
+    """列字典：{ 列名: [每行值…] }。"""
     return isinstance(x, dict) and (not x or all(isinstance(v, list) for v in x.values()))
 
 
 def _unwrap_column_bundle_to_columns_dict(raw_source: Any) -> Any:
-    """
-    兼容两种“列包”形态：
-    1) {field: [values...]}  （列字典；这里的 field 指“数据列名”，不是算子 config 的 field 键）
-    2) [{field: [values...]}]（列包 list 包一层；同上）
-    返回列字典；若不是列包则返回 None。
-    """
+    """列字典或单元素列包 [{col: [...]}] → 列字典；否则返回 None。"""
     if _is_columns_dict(raw_source):
         return raw_source
     if isinstance(raw_source, list) and len(raw_source) == 1 and isinstance(raw_source[0], dict):
@@ -51,7 +69,7 @@ def _unwrap_column_bundle_to_columns_dict(raw_source: Any) -> Any:
 
 
 def _columns_dict_to_rows(columns: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
-    """列字典转行列表：{col:[...]} -> [{col:v,...}, ...]"""
+    """列字典转行列表。"""
     if not columns:
         return []
     keys = list(columns.keys())
@@ -69,8 +87,13 @@ def _columns_dict_to_rows(columns: Dict[str, List[Any]]) -> List[Dict[str, Any]]
     return out
 
 
-def _maybe_return_columns(input_is_columns: bool, rows: List[Dict[str, Any]]):
-    return rows_to_field_list_dict(rows) if input_is_columns else rows
+def _dedupe_key_hashable(parts: Any) -> Any:
+    """去重用键：可 hash 则原样返回，否则 JSON 序列化（避免 list/dict 作 tuple 元素导致 unhashable）。"""
+    try:
+        hash(parts)
+        return parts
+    except TypeError:
+        return json.dumps(parts, sort_keys=True, default=str)
 
 
 def _resolve_item_value(item: dict, field_name: str):
@@ -156,15 +179,18 @@ _FILTER_SLOT_OPS = frozenset({
 })
 
 
-def _context_step_base_ref(step_key: str) -> str:
-    """${step_key}.列名 → 取行表时用 ${step_key}。"""
-    return "${%s}" % (step_key or "").strip()
-
-
 @OperatorRegistry.register("filter_by_condition")
 class FilterByConditionOperator(BaseOperator):
-    """按条件过滤：记录列表或标量数组。槽位写法：first_value 为 `${step}` 或 `${step}.列名`，
-    second_value 为比较符，third_value 为比较值。另支持 conditions 或 second_value 为条件 list/dict。"""
+    """按条件过滤：记录列表或标量数组。
+
+    主路径为「四槽」（整表过滤、输出保留行内全部列）：
+    - first_value：行表数据源
+    - second_value：比较列名（**字符串**），或 **字符串数组**（多列 AND，共用 third/fourth）
+    - third_value：比较符（ge/gt/eq/...）
+    - fourth_value：比较右值
+
+    亦可传显式 ``conditions``，或由 second 提供条件对象列表 / 字段条件字典（见 _resolve_config）。
+    """
     name = "filter_by_condition"
     config_schema = {
         "type": "object",
@@ -174,7 +200,6 @@ class FilterByConditionOperator(BaseOperator):
             "third_value": {},
             "fourth_value": {},
             "conditions": {},
-            "_slot_row_filter": {},
         },
     }
     default_config = {"conditions": {}}
@@ -192,43 +217,66 @@ class FilterByConditionOperator(BaseOperator):
             return merged
 
         sv0 = merged.get("second_value")
-        if isinstance(sv0, (list, dict)):
+        fv0 = merged.get("first_value")
+        tv = merged.get("third_value")
+
+        # second 为「条件对象」列表（每项为 dict）→ 直接作为 conditions
+        if isinstance(sv0, list) and len(sv0) > 0 and all(isinstance(x, dict) for x in sv0):
             merged["conditions"] = sv0
             merged["second_value"] = None
             return merged
 
-        fv0 = merged.get("first_value")
+        # 新：整表 + second 为字段名列表 + third 为比较符 + fourth 为比较值（输出仍保留行内全部列）
+        if (
+            isinstance(sv0, list)
+            and len(sv0) > 0
+            and all(isinstance(x, str) for x in sv0)
+            and any(str(x).strip() for x in sv0)
+            and isinstance(tv, str)
+            and tv.strip().lower() in _FILTER_SLOT_OPS
+        ):
+            op = tv.strip().lower()
+            rhs = merged.get("fourth_value")
+            merged["conditions"] = [
+                {
+                    "field": _normalize_field_name(str(x).strip()),
+                    "operator": op,
+                    "value": rhs,
+                }
+                for x in sv0
+                if isinstance(x, str) and str(x).strip()
+            ]
+            merged["second_value"] = None
+            merged["third_value"] = None
+            merged["fourth_value"] = None
+            return merged
+
+        if isinstance(sv0, dict):
+            merged["conditions"] = sv0
+            merged["second_value"] = None
+            return merged
+
         tv = merged.get("third_value")
         sv = merged.get("second_value")
         op_third = isinstance(tv, str) and tv.strip().lower() in _FILTER_SLOT_OPS
         op_second = isinstance(sv, str) and sv.strip().lower() in _FILTER_SLOT_OPS
 
-        # 已废弃：first + second 列名 + third 比较符 + fourth 比较值
         if (
             fv0 not in (None, "")
             and op_third
             and isinstance(sv, str)
             and not op_second
         ):
-            raise OperatorException(
-                "条件过滤已不再支持「四槽」写法（first 数据源 + second 列名 + third 比较符 + fourth 比较值）。"
-                "请改为合并 first_value：使用 `${step}.列名` 表示数据与比较列，"
-                "second_value 传比较符，third_value 传比较值。",
-                code=ErrorCode.CONFIG_FORMAT_ERROR,
-                operator=self.name,
-                config=config,
-            )
-
-        if op_second and fv0 not in (None, ""):
-            field_name = ""
-            if isinstance(fv0, str):
-                cref = _parse_context_ref(fv0)
-                if cref and cref[1]:
-                    field_name = str(cref[1]).strip()
             merged["conditions"] = [
-                {"field": field_name, "operator": sv.strip().lower(), "value": merged.get("third_value")}
+                {
+                    "field": _normalize_field_name(sv.strip()),
+                    "operator": tv.strip().lower(),
+                    "value": merged.get("fourth_value"),
+                }
             ]
-            merged["_slot_row_filter"] = True
+            merged["second_value"] = None
+            merged["third_value"] = None
+            merged["fourth_value"] = None
             return merged
 
         return merged
@@ -236,31 +284,12 @@ class FilterByConditionOperator(BaseOperator):
     def execute(self, data, config, context: ExecutionContext):
         ctx = _ctx(context)
         fv = config.get("first_value")
-        if config.get("_slot_row_filter") and isinstance(fv, str):
-            cref = _parse_context_ref(fv)
-            if cref and cref[1]:
-                step_key, _sub = cref
-                raw_source = extract_field_value(data, _context_step_base_ref(step_key), ctx)
-            else:
-                raw_source = extract_field_value(data, fv, ctx)
-        else:
-            raw_source = extract_field_value(data, fv, ctx)
+        raw_source = extract_field_value(data, fv, ctx)
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
-        input_is_columns = columns_dict is not None
-        raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
+        raw_data = _columns_dict_to_rows(columns_dict) if columns_dict is not None else _to_list(raw_source)
         raw_conditions = config.get("conditions", {})
 
         cond_list: list = self._normalize_conditions(raw_conditions)
-
-        if config.get("_slot_row_filter") and raw_data:
-            if any(isinstance(item, dict) for item in raw_data):
-                if cond_list and _is_blank_field(str(cond_list[0].get("field", ""))):
-                    raise OperatorException(
-                        "按记录行过滤时须在 first_value 中带上 `.列名`（如 ${extract_rows}.score）。",
-                        code=ErrorCode.CONFIG_MISSING,
-                        operator=self.name,
-                        config=config,
-                    )
 
         out = []
         for item in raw_data:
@@ -270,7 +299,7 @@ class FilterByConditionOperator(BaseOperator):
             else:
                 if self._match_scalar(item, cond_list):
                     out.append(item)
-        return _maybe_return_columns(input_is_columns, out)
+        return out
 
     @staticmethod
     def _normalize_conditions(raw) -> list:
@@ -325,6 +354,20 @@ class FilterByConditionOperator(BaseOperator):
         return True
 
 
+def _select_field_names_from_config(data: Dict, sec: Any, context: ExecutionContext) -> List:
+    """
+    select_fields 的字段列表：纯字符串列名（无 ${}）按字面量使用，避免 get_value 在整表上
+    递归同名嵌套字段把 second_value 误展开成数值列表。
+    """
+    if sec in (None, ""):
+        return []
+    if isinstance(sec, list) and sec and all(isinstance(x, str) for x in sec):
+        if any(_looks_like_context_ref(str(x)) for x in sec):
+            return get_value(data, sec, context) or []
+        return list(sec)
+    return get_value(data, sec, context) or []
+
+
 def _normalize_field_name(name: str) -> str:
     """去掉字段名首尾的多余引号，避免前端传 "\\"姓名\\"" 导致与 CSV 列名 姓名 不匹配。"""
     if not name or not isinstance(name, str):
@@ -349,27 +392,21 @@ class SelectFieldsOperator(BaseOperator):
         raw_source = extract_field_value(data, config.get("first_value"), _ctx(context))
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
         if columns_dict is not None:
-            fields = (
-                get_value(data, config.get("second_value"), context)
-                if config.get("second_value") not in (None, "")
-                else []
+            fields = _select_field_names_from_config(
+                data, config.get("second_value"), context
             )
             if not fields:
-                return [columns_dict]
+                return column_dict_to_records(columns_dict)
             normalized = [_normalize_field_name(f) for f in fields]
             out_dict: Dict[str, Any] = {}
             for orig, norm in zip(fields, normalized):
                 key = norm if norm in columns_dict else (orig if orig in columns_dict else norm)
                 if key in columns_dict:
                     out_dict[norm] = columns_dict[key]
-            return [out_dict] if out_dict else [{}]
+            return column_dict_to_records(out_dict) if out_dict else []
 
         raw_data = _to_list(raw_source)
-        fields = (
-            get_value(data, config.get("second_value"), context)
-            if config.get("second_value") not in (None, "")
-            else []
-        )
+        fields = _select_field_names_from_config(data, config.get("second_value"), context)
         if not fields:
             return raw_data
         # 规范化字段名，便于匹配 CSV 列名（如 姓名 而不是 "姓名"）
@@ -394,17 +431,18 @@ class SelectFieldsOperator(BaseOperator):
                     row[normalized[i] if i < len(normalized) else key] = item[key]
             if row:
                 out.append(row)
-        if len(fields) == 1:
-            key_use = normalized[0]
-            return [item.get(key_use) if key_use in item else item.get(fields[0]) for item in raw_data if isinstance(item, dict) and (key_use in item or fields[0] in item)]
+        # 始终返回行式 List[Dict]；单列时不再退化为标量列表（避免丢失同表其它列的语义期望）。
         return out
 
 
 @OperatorRegistry.register("remove_duplicates")
 class RemoveDuplicatesOperator(BaseOperator):
-    """去重算子；数据来源为 first_value；key_fields 为 second_value。"""
+    """去重算子；数据来源为 first_value；key_fields 为 second_value；third_value 为 first/last 保留策略。"""
     name = "remove_duplicates"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "key_fields": {"type": "array"}}}
+    config_schema = {
+        "type": "object",
+        "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "key_fields": {"type": "array"}},
+    }
     default_config = {}
 
     def _resolve_config(self, config):
@@ -412,34 +450,41 @@ class RemoveDuplicatesOperator(BaseOperator):
         if merged.get("second_value") not in (None, ""):
             merged["key_fields"] = merged.get("second_value")
             merged["second_value"] = None
+        tv = merged.get("third_value")
+        if tv not in (None, ""):
+            s = str(tv).strip().lower()
+            if s in ("first", "last"):
+                merged["dedupe_keep"] = s
+            merged["third_value"] = None
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
         raw_source = extract_field_value(data, config.get("first_value"), _ctx(context))
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
-        input_is_columns = columns_dict is not None
-        raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
+        raw_data = _columns_dict_to_rows(columns_dict) if columns_dict is not None else _to_list(raw_source)
+        keep = str(config.get("dedupe_keep") or "first").strip().lower()
+        if keep == "last":
+            raw_data = list(reversed(raw_data))
         key_fields = config.get("key_fields")
         seen = set()
         out = []
         for item in raw_data:
-            try:
-                if key_fields:
-                    if not isinstance(item, dict):
-                        continue
-                    key = tuple(item.get(f) for f in key_fields if f in item)
+            if key_fields:
+                if not isinstance(item, dict):
+                    continue
+                parts = tuple(item.get(f) for f in key_fields if f in item)
+                key = _dedupe_key_hashable(parts)
+            else:
+                if isinstance(item, dict):
+                    key = _dedupe_key_hashable(tuple(sorted(item.items())))
                 else:
-                    key = tuple(sorted(item.items())) if isinstance(item, dict) else item
-                if key not in seen:
-                    seen.add(key)
-                    out.append(item)
-            except TypeError:
-                import json
-                key = json.dumps(item, sort_keys=True, default=str)
-                if key not in seen:
-                    seen.add(key)
-                    out.append(item)
-        return _maybe_return_columns(input_is_columns, out if input_is_columns else out)
+                    key = _dedupe_key_hashable(item)
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+        if keep == "last":
+            out = list(reversed(out))
+        return out
 
 
 @OperatorRegistry.register("remove_nulls")
@@ -465,8 +510,7 @@ class RemoveNullsOperator(BaseOperator):
     def execute(self, data, config, context: ExecutionContext):
         raw_source = get_value(data, config.get("first_value"), context)
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
-        input_is_columns = columns_dict is not None
-        raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
+        raw_data = _columns_dict_to_rows(columns_dict) if columns_dict is not None else _to_list(raw_source)
         fields_to_check = config.get("fields_to_check")
         strategy = config.get("strategy", "remove")
         fill_value = config.get("fill_value", 0)
@@ -498,7 +542,7 @@ class RemoveNullsOperator(BaseOperator):
             if strategy == "remove" and has_null:
                 continue
             out.append(item_copy)
-        return _maybe_return_columns(input_is_columns, out)
+        return out
 
 
 def _percentile(values: List[float], p: float) -> float:
@@ -557,10 +601,9 @@ class RemoveOutliersOperator(BaseOperator):
     def execute(self, data, config, context: ExecutionContext):
         raw_source = extract_field_value(data, config.get("first_value"), _ctx(context))
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
-        input_is_columns = columns_dict is not None
-        raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
+        raw_data = _columns_dict_to_rows(columns_dict) if columns_dict is not None else _to_list(raw_source)
         if not raw_data:
-            return _maybe_return_columns(input_is_columns, raw_data)
+            return raw_data
 
         method = config.get("method", "iqr")
         threshold = float(config.get("threshold", 1.5 if method == "iqr" else 3.0))
@@ -581,12 +624,12 @@ class RemoveOutliersOperator(BaseOperator):
                 elif strategy == "clip":
                     out.append(max(lo, min(hi, v)))
                 # strategy == "remove": 丢弃
-            return _maybe_return_columns(input_is_columns, out)
+            return out
 
 
         target_fields = list(config.get("target_fields") or [])
         if not target_fields:
-            return _maybe_return_columns(input_is_columns, raw_data)
+            return raw_data
 
         field_bounds: dict = {}
         if manual_ranges:
@@ -640,7 +683,11 @@ class SortDataOperator(BaseOperator):
             merged["sort_by"] = merged.get("second_value")
             merged["second_value"] = None
         if merged.get("third_value") not in (None, ""):
-            merged["order"] = "asc" if bool(merged.get("third_value")) else "desc"
+            tv = merged.get("third_value")
+            if isinstance(tv, str) and tv.strip().lower() in ("asc", "desc"):
+                merged["order"] = tv.strip().lower()
+            else:
+                merged["order"] = "asc" if bool(tv) else "desc"
             merged["third_value"] = None
         if merged.get("fourth_value") not in (None, ""):
             merged["null_placement"] = merged.get("fourth_value")
@@ -650,10 +697,9 @@ class SortDataOperator(BaseOperator):
     def execute(self, data, config, context: ExecutionContext):
         raw_source = extract_field_value(data, config.get("first_value"), _ctx(context))
         columns_dict = _unwrap_column_bundle_to_columns_dict(raw_source)
-        input_is_columns = columns_dict is not None
-        raw_data = _columns_dict_to_rows(columns_dict) if input_is_columns else _to_list(raw_source)
+        raw_data = _columns_dict_to_rows(columns_dict) if columns_dict is not None else _to_list(raw_source)
         if not raw_data:
-            return _maybe_return_columns(input_is_columns, raw_data)
+            return raw_data
         sort_by = config.get("sort_by")
         order = config.get("order", "asc")
         null_placement = config.get("null_placement", "last")
@@ -686,23 +732,40 @@ class SortDataOperator(BaseOperator):
         reverse = order_list[0].lower() == "desc" if order_list else False
         try:
             out = sorted(raw_data, key=key_fn, reverse=reverse)
-            return _maybe_return_columns(input_is_columns, out)
+            return out
         except TypeError:
             out = sorted(raw_data, key=lambda x: str(x).lower(), reverse=reverse)
-            return _maybe_return_columns(input_is_columns, out)
+            return out
 
 
 @OperatorRegistry.register("rename_fields")
 class RenameFieldsOperator(BaseOperator):
-    """字段重命名；数据来源为 first_value；mappings 为 second_value。"""
+    """字段重命名；数据来源为 first_value；``second_value``+``third_value`` 为单字段改名，或 ``second_value`` 为映射表 dict。"""
     name = "rename_fields"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "mappings": {}}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "mappings": {}}}
     default_config = {"mappings": {}}
 
     def _resolve_config(self, config):
         merged = dict(super()._resolve_config(config))
-        if merged.get("second_value") not in (None, ""):
-            merged["mappings"] = merged.get("second_value")
+        sec = merged.get("second_value")
+        third = merged.get("third_value")
+        if isinstance(sec, dict):
+            merged["mappings"] = sec
+            merged["second_value"] = None
+        elif isinstance(sec, str) and sec.strip():
+            if isinstance(third, str) and third.strip():
+                merged["mappings"] = {sec.strip(): third.strip()}
+                merged["second_value"] = None
+                merged["third_value"] = None
+            else:
+                raise OperatorException(
+                    "rename_fields：second_value 为原列名（字符串）时，必须同时提供 third_value 为新列名",
+                    code=ErrorCode.CONFIG_MISSING,
+                    operator=self.name,
+                    config=config,
+                )
+        elif sec not in (None, ""):
+            merged["mappings"] = sec
             merged["second_value"] = None
         return merged
 

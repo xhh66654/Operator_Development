@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...core.exceptions import OperatorException, ErrorCode
-from .._common import normalize_config_input, rows_to_field_list_dict
+from .._common import normalize_config_input, records_to_latest_columns_dict
 from ..connection.elasticsearch import ES_CLIENT_CONTEXT_KEY, ensure_service_es_client
 
 ES_EXTRACT_CACHE_CONTEXT_KEY = "_es_extract_cache"
@@ -105,10 +105,9 @@ class ESExtractOperator(BaseOperator):
                 resp = client.search(**search_kwargs)
                 hits = resp.get("hits", {}).get("hits", []) or []
                 rows = [hit.get("_source", {}) for hit in hits]
-                column_bundle = rows_to_field_list_dict(rows)
-                context.set(ES_EXTRACT_CACHE_CONTEXT_KEY, column_bundle)
-                context.set(context.LATEST_COLUMNS_KEY, column_bundle[0] if column_bundle else {})
-                return column_bundle
+                context.set(ES_EXTRACT_CACHE_CONTEXT_KEY, rows)
+                context.set(context.LATEST_COLUMNS_KEY, records_to_latest_columns_dict(rows))
+                return rows
 
             page_size = int(config.get("page_size", 1000))
             if page_size <= 0:
@@ -163,10 +162,9 @@ class ESExtractOperator(BaseOperator):
                     except Exception:
                         pass
 
-            column_bundle = rows_to_field_list_dict(hits_sources)
-            context.set(ES_EXTRACT_CACHE_CONTEXT_KEY, column_bundle)
-            context.set(context.LATEST_COLUMNS_KEY, column_bundle[0] if column_bundle else {})
-            return column_bundle
+            context.set(ES_EXTRACT_CACHE_CONTEXT_KEY, hits_sources)
+            context.set(context.LATEST_COLUMNS_KEY, records_to_latest_columns_dict(hits_sources))
+            return hits_sources
         except Exception as e:
             raise OperatorException(
                 f"从ES提取失败: {e}",

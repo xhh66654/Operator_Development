@@ -3,7 +3,7 @@ from typing import Any, Dict, List
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
 from ...core.exceptions import OperatorException, ErrorCode
-from .._common import get_value, normalize_config_input, rows_to_field_list_dict
+from .._common import column_dict_to_records, get_value, normalize_config_input
 
 
 def _is_column_bundle(x: Any) -> bool:
@@ -98,12 +98,26 @@ class JsonExtractOperator(BaseOperator):
         if _is_column_bundle(raw):
             d0 = raw[0]
             default = config.get("fifth_value")
+            if not d0:
+                return []
+            n0 = len(next(iter(d0.values())))
             if isinstance(fields, list) and fields:
                 keys = [str(k).strip() for k in fields if str(k).strip()]
-                return [{k: d0.get(k, default) for k in keys}] if keys else [{}]
+                if not keys:
+                    return []
+                sub: Dict[str, List[Any]] = {}
+                for k in keys:
+                    if k in d0:
+                        sub[k] = d0[k]
+                    else:
+                        sub[k] = [default] * n0
+                return column_dict_to_records(sub)
             if field_name:
-                return [{str(field_name): d0.get(field_name, default)}]
-            return raw
+                fn = str(field_name)
+                if fn in d0:
+                    return column_dict_to_records({fn: d0[fn]})
+                return [{fn: default} for _ in range(n0)]
+            return column_dict_to_records(d0)
 
         nested_path = str(config.get("third_value") or "").strip()
         filter_cond = config.get("fourth_value") if isinstance(config.get("fourth_value"), dict) else {}
@@ -121,7 +135,7 @@ class JsonExtractOperator(BaseOperator):
             if isinstance(fields, list) and fields:
                 keys = [str(k).strip() for k in fields if str(k).strip()]
                 if not keys:
-                    return [{}]
+                    return []
                 if mode == "rows":
                     out_rows: List[Dict[str, Any]] = []
                     for item in raw:
@@ -130,7 +144,7 @@ class JsonExtractOperator(BaseOperator):
                         if filter_cond and not _matches_filter(item, filter_cond):
                             continue
                         out_rows.append({k: _pick(item, k) for k in keys})
-                    return rows_to_field_list_dict(out_rows)
+                    return out_rows
                 out_cols: Dict[str, List[Any]] = {k: [] for k in keys}
                 for item in raw:
                     if not isinstance(item, dict):
@@ -139,7 +153,7 @@ class JsonExtractOperator(BaseOperator):
                         continue
                     for k in keys:
                         out_cols[k].append(_pick(item, k))
-                return [out_cols]
+                return column_dict_to_records(out_cols)
 
             out: List[Any] = []
             for item in raw:
@@ -156,34 +170,35 @@ class JsonExtractOperator(BaseOperator):
                 out.append(val)
             fn = field_name or "value"
             vals = out if isinstance(out, list) else [out]
-            return [{str(fn): vals}]
+            return [{str(fn): v} for v in vals]
 
         if isinstance(raw, dict):
             if isinstance(fields, list) and fields:
                 keys = [str(k).strip() for k in fields if str(k).strip()]
                 if not keys:
-                    return [{}]
+                    return []
                 inner = {k: _pick(raw, k) for k in keys}
                 if inner and all(isinstance(v, list) for v in inner.values()):
-                    return [inner]
+                    return column_dict_to_records(inner)
                 col_lists: Dict[str, List[Any]] = {
                     k: (v if isinstance(v, list) else [v]) for k, v in inner.items()
                 }
-                return [col_lists]
+                return column_dict_to_records(col_lists)
             if nested_path:
                 v = _get_nested(raw, nested_path, default)
                 if v is None:
                     return default
                 vl = v if isinstance(v, list) else [v]
-                return [{nested_path.split(".")[-1] or "value": vl}]
+                nk = nested_path.split(".")[-1] or "value"
+                return column_dict_to_records({nk: vl})
             if field_name:
                 v = raw.get(field_name, default)
                 if v is None:
                     return default
                 vl = v if isinstance(v, list) else [v]
-                return [{str(field_name): vl}]
+                return column_dict_to_records({str(field_name): vl})
             if raw and all(isinstance(v, list) for v in raw.values()):
-                return [raw]
-            return rows_to_field_list_dict([raw])
+                return column_dict_to_records(raw)
+            return [raw]
 
         return default

@@ -104,9 +104,9 @@ def _ctx(context) -> Dict[str, Any]:
 
 def rows_to_field_list_dict(rows: List[Dict[str, Any]]) -> List[Dict[str, List[Any]]]:
     """
-    提取类算子统一输出：单行字典，键为字段名、值为该列在行方向上的取值列表，
-    再包一层列表 → [{字段名: [值, ...], ...}]。
-    无数据时返回 [{}]，与「列表套字典」约定一致。
+    将行表转为「列包」形态 [{字段名: [值, ...], ...}]（遗留/少数算子仍可能使用）。
+    无数据时返回 [{}]。
+    新约定：提取算子主输出为行表 List[Dict]，请优先用 records_to_latest_columns_dict 写上下文列视图。
     """
     if not rows:
         return [{}]
@@ -122,6 +122,42 @@ def rows_to_field_list_dict(rows: List[Dict[str, Any]]) -> List[Dict[str, List[A
         for k in keys:
             out[k].append(r.get(k))
     return [out]
+
+
+def records_to_latest_columns_dict(rows: List[Dict[str, Any]]) -> Dict[str, List[Any]]:
+    """
+    行表 → {列名: [按行序的值, ...]}，供 ExecutionContext.LATEST_COLUMNS_KEY、
+    extract_field_value 从 _latest_columns 按裸字段名回退等。
+    """
+    if not rows:
+        return {}
+    keys: List[str] = []
+    seen = set()
+    for r in rows:
+        for k in r.keys():
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+    return {k: [r.get(k) for r in rows] for k in keys}
+
+
+def column_dict_to_records(columns: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
+    """
+    列字典 {col: [v0, v1, ...]} → 行记录列表。
+    列长度不一致时抛 SCHEMA_MISMATCH。
+    """
+    if not columns:
+        return []
+    keys = list(columns.keys())
+    lengths = [len(columns[k]) for k in keys]
+    if lengths and len(set(lengths)) != 1:
+        raise OperatorException(
+            f"列式字段列表长度不一致，无法对齐为行表：{ {k: len(columns[k]) for k in keys} }",
+            code=ErrorCode.SCHEMA_MISMATCH,
+            operator="table",
+        )
+    n = lengths[0] if lengths else 0
+    return [{k: columns[k][i] for k in keys} for i in range(n)]
 
 
 def _looks_like_context_ref(s: str) -> bool:
