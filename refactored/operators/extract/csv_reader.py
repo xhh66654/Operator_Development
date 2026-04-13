@@ -63,13 +63,6 @@ class ExtractFromCsvOperator(BaseOperator):
 
     def _resolve_config(self, config):
         c = normalize_config_input(super()._resolve_config(config))
-        # 兼容顺序参数（文档/前端早期使用 first_value/second_value...）
-        # first_value -> file_path
-        # second_value -> encoding
-        # third_value -> delimiter
-        # fourth_value -> selected_columns
-        # fifth_value -> skip_rows
-        # sixth_value -> max_rows
         if c.get("file_path") in (None, "") and c.get("first_value") not in (None, ""):
             c["file_path"] = c.get("first_value")
             c["first_value"] = None

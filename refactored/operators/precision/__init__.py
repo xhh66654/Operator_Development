@@ -1,4 +1,3 @@
 """精度类算子。"""
-from . import impl  # noqa: F401
-
+from . import impl
 __all__ = ["impl"]
