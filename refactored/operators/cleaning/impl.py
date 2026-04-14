@@ -740,19 +740,32 @@ class SortDataOperator(BaseOperator):
 
 @OperatorRegistry.register("rename_fields")
 class RenameFieldsOperator(BaseOperator):
-    """字段重命名；数据来源为 first_value；``second_value``+``third_value`` 为单字段改名，或 ``second_value`` 为映射表 dict。"""
+    """字段重命名；数据来源为 first_value；仅支持 ``second_value``（原列名）+ ``third_value``（新列名）单对改名。"""
     name = "rename_fields"
-    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}, "mappings": {}}}
-    default_config = {"mappings": {}}
+    config_schema = {"type": "object", "properties": {"first_value": {}, "second_value": {}, "third_value": {}}}
+    default_config = {}
 
     def _resolve_config(self, config):
         merged = dict(super()._resolve_config(config))
+        raw_map = merged.get("mappings")
+        if isinstance(raw_map, dict) and len(raw_map) > 0:
+            raise OperatorException(
+                "rename_fields 不支持 mappings 批量映射；请使用 second_value=原列名、third_value=新列名",
+                code=ErrorCode.CONFIG_INVALID,
+                operator=self.name,
+                config=config,
+            )
+        merged.pop("mappings", None)
         sec = merged.get("second_value")
         third = merged.get("third_value")
         if isinstance(sec, dict):
-            merged["mappings"] = sec
-            merged["second_value"] = None
-        elif isinstance(sec, str) and sec.strip():
+            raise OperatorException(
+                "rename_fields 不支持将映射表放在 second_value；请使用 second_value=原列名、third_value=新列名",
+                code=ErrorCode.CONFIG_INVALID,
+                operator=self.name,
+                config=config,
+            )
+        if isinstance(sec, str) and sec.strip():
             if isinstance(third, str) and third.strip():
                 merged["mappings"] = {sec.strip(): third.strip()}
                 merged["second_value"] = None
@@ -765,8 +778,14 @@ class RenameFieldsOperator(BaseOperator):
                     config=config,
                 )
         elif sec not in (None, ""):
-            merged["mappings"] = sec
-            merged["second_value"] = None
+            raise OperatorException(
+                "rename_fields 仅支持 second_value、third_value 均为非空字符串（单列改名）",
+                code=ErrorCode.CONFIG_INVALID,
+                operator=self.name,
+                config=config,
+            )
+        else:
+            merged["mappings"] = {}
         return merged
 
     def execute(self, data, config, context: ExecutionContext):
