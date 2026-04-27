@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+from statistics import fmean
 from typing import Any, Dict, List, Optional, Union
 
 from ..core import ExecutionContext, OperatorRegistry
@@ -254,12 +255,47 @@ def normalize_operator_key(key: Union[str, Any]) -> str:
     return _OPERATOR_KEY_ALIASES.get(s, s)
 
 
+def _ctx_alias_keys(raw: Any) -> List[str]:
+    """
+    同一节点 id 在上下文中可能出现的多种字符串键（Java/Gson 等可能把大整数变成 float）。
+    set/get 时写入/尝试多个别名，避免 ``2100000000000001`` 与 ``2.1e+15`` 对不上。
+    """
+    out: List[str] = []
+    if raw is None:
+        return out
+    if isinstance(raw, bool):
+        out.append(str(raw))
+        return list(dict.fromkeys(out))
+    if isinstance(raw, int):
+        out.append(str(raw))
+        return list(dict.fromkeys(out))
+    if isinstance(raw, float):
+        out.append(str(raw))
+        try:
+            if raw.is_integer():
+                out.append(str(int(raw)))
+        except (ValueError, OverflowError):
+            pass
+        return list(dict.fromkeys(out))
+    s = str(raw).strip()
+    if s:
+        out.append(s)
+    try:
+        if "e" not in s.lower() and "." not in s and s.lstrip("-").isdigit():
+            out.append(str(int(s)))
+    except ValueError:
+        pass
+    return list(dict.fromkeys(out))
+
+
 def _ctx_lookup(ctx: ExecutionContext, ref_key: str) -> Any:
-    k = ref_key.strip()
-    val = ctx.get(k)
-    if val is not None:
-        return val
-    return ctx.get(str(k))
+    for k in _ctx_alias_keys(ref_key):
+        if not k:
+            continue
+        val = ctx.get(k)
+        if val is not None:
+            return val
+    return None
 
 
 def resolve_config_refs(value: Any, ctx: ExecutionContext) -> Any:
@@ -306,25 +342,72 @@ def resolve_config_refs(value: Any, ctx: ExecutionContext) -> Any:
 
 
 def _is_leaf_metric(node: Dict[str, Any]) -> bool:
-    """叶子指标：有 indicatorId、无顶层 operator_key、有 steps 算子链。"""
+    """
+    叶子指标：无顶层 ``operator_key``、有非空 ``steps`` 算子链，且至少具备其一：
+
+    - ``indicatorId``（引擎原约定）
+    - ``reasoningIds`` / ``reasoning_ids`` 非空数组（Java 常见「基础指标」写法）
+
+    仅有 ``id`` 而无上述字段时仍按容器节点处理，避免误判。
+    """
     node = normalize_tree_node(node)
-    return (
-        node.get("indicatorId") is not None
-        and not str(node.get("operator_key") or "").strip()
-        and isinstance(node.get("steps"), list)
-        and len(node["steps"]) > 0
-    )
+    if str(node.get("operator_key") or "").strip():
+        return False
+    if not isinstance(node.get("steps"), list) or len(node["steps"]) == 0:
+        return False
+    if node.get("indicatorId") is not None:
+        return True
+    rids = node.get("reasoningIds") or node.get("reasoning_ids")
+    if isinstance(rids, str) and rids.strip():
+        rids = [rids]
+    if isinstance(rids, list) and any(x is not None and str(x).strip() for x in rids):
+        return True
+    return False
 
 
 def _store_node_outputs(ctx: ExecutionContext, node: Dict[str, Any], val: Any) -> None:
     node = normalize_tree_node(node)
-    if node.get("node_id") is not None:
-        ctx.set(str(node["node_id"]), val)
-    nid = node.get("id")
-    if nid is not None and str(nid).strip():
-        ctx.set(str(nid), val)
-    if node.get("indicatorId") is not None:
-        ctx.set(str(node["indicatorId"]), val)
+    for k in _ctx_alias_keys(node.get("node_id")):
+        ctx.set(k, val)
+    for k in _ctx_alias_keys(node.get("id")):
+        ctx.set(k, val)
+    for k in _ctx_alias_keys(node.get("indicatorId")):
+        ctx.set(k, val)
+
+
+def _primary_node_store_key(node: Dict[str, Any]) -> str:
+    for k in _ctx_alias_keys(node.get("id")) + _ctx_alias_keys(node.get("node_id")):
+        if k:
+            return k
+    return ""
+
+
+def _collect_operator_chain_ctx_keys(steps: Any) -> List[str]:
+    """叶子算子链里会写入 ctx 的 step id 别名列表，便于按 rid 重跑前清理。"""
+    keys: List[str] = []
+    if not isinstance(steps, list):
+        return keys
+    for item in steps:
+        if not isinstance(item, dict):
+            continue
+        if item.get("steps") and not str(item.get("operator_key") or "").strip():
+            keys.extend(_collect_operator_chain_ctx_keys(item["steps"]))
+            continue
+        if str(item.get("operator_key") or item.get("operator") or "").strip():
+            for k in _ctx_alias_keys(item.get("id") or item.get("node_id")):
+                if k:
+                    keys.append(k)
+    return list(dict.fromkeys(keys))
+
+
+def _reasoning_display_lookup(ctx: ExecutionContext, node: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    for k in _ctx_alias_keys(node.get("id")) + _ctx_alias_keys(node.get("node_id")):
+        if not k:
+            continue
+        d = ctx.get_reasoning_display_result(k)
+        if d is not None:
+            return d
+    return None
 
 
 def _pythonize(dv: Any) -> Any:
@@ -345,8 +428,7 @@ def run_operator_chain(chain_steps: List[Any], ctx: ExecutionContext) -> Any:
             # 需要写入 ctx 以支持 ${container_id} 引用。
             last_dv = run_operator_chain(item["steps"], ctx)
             raw_key = item.get("id") or item.get("node_id") or item.get("step_key")
-            step_key = str(raw_key).strip() if raw_key is not None else ""
-            if step_key:
+            for step_key in _ctx_alias_keys(raw_key):
                 ctx.set(step_key, _pythonize(last_dv))
             continue
         op_key = item.get("operator_key") or item.get("operator")
@@ -354,7 +436,8 @@ def run_operator_chain(chain_steps: List[Any], ctx: ExecutionContext) -> Any:
             continue
         op_name = normalize_operator_key(op_key)
         raw_key = item.get("id") or item.get("node_id") or item.get("step_key")
-        step_key = str(raw_key).strip() if raw_key is not None else ""
+        step_keys = _ctx_alias_keys(raw_key)
+        step_key = step_keys[0] if step_keys else ""
         cfg = resolve_config_refs(copy.deepcopy(item.get("config") or {}), ctx)
         op = OperatorRegistry.get(op_name)
         t0 = time.perf_counter()
@@ -371,8 +454,8 @@ def run_operator_chain(chain_steps: List[Any], ctx: ExecutionContext) -> Any:
                 elapsed_s=time.perf_counter() - t0,
             )
         py = _pythonize(last_dv)
-        if step_key:
-            ctx.set(step_key, py)
+        for sk in step_keys:
+            ctx.set(sk, py)
     return last_dv
 
 
@@ -383,6 +466,42 @@ def exec_metric_subtree(node: Any, ctx: ExecutionContext) -> None:
         return
 
     if _is_leaf_metric(node):
+        rids_raw = node.get("reasoningIds") or node.get("reasoning_ids")
+        if isinstance(rids_raw, str) and rids_raw.strip():
+            rids_raw = [rids_raw]
+        if isinstance(rids_raw, list) and any(x is not None and str(x).strip() for x in rids_raw):
+            chain_keys = _collect_operator_chain_ctx_keys(node.get("steps"))
+            per: Dict[str, Any] = {}
+            prev_outer: Any = ctx.get("_active_reasoning_id")
+            try:
+                for rid in rids_raw:
+                    if rid is None or not str(rid).strip():
+                        continue
+                    rk = str(rid).strip()
+                    ctx.set("_active_reasoning_id", rid)
+                    last = run_operator_chain(node["steps"], ctx)
+                    per[rk] = _pythonize(last)
+                    for ck in chain_keys:
+                        ctx.remove(ck)
+            finally:
+                if prev_outer is not None:
+                    ctx.set("_active_reasoning_id", prev_outer)
+                else:
+                    ctx.remove("_active_reasoning_id")
+            nums: List[float] = []
+            for v in per.values():
+                if isinstance(v, bool):
+                    continue
+                if isinstance(v, (int, float)):
+                    if isinstance(v, float) and (v != v or abs(v) == float("inf")):
+                        continue
+                    nums.append(float(v))
+            agg: Any = fmean(nums) if nums else None
+            _store_node_outputs(ctx, node, agg)
+            pk = _primary_node_store_key(node)
+            if pk:
+                ctx.set_reasoning_display_result(pk, per)
+            return
         last = run_operator_chain(node["steps"], ctx)
         val = _pythonize(last)
         _store_node_outputs(ctx, node, val)
@@ -427,17 +546,16 @@ def exec_metric_subtree(node: Any, ctx: ExecutionContext) -> None:
 
 def _lookup_node_result(node: Dict[str, Any], ctx: ExecutionContext) -> Any:
     node = normalize_tree_node(node)
-    if node.get("node_id") is not None:
-        v = ctx.get(str(node["node_id"]))
+    for k in _ctx_alias_keys(node.get("node_id")):
+        v = ctx.get(k)
         if v is not None:
             return v
-    nid = node.get("id")
-    if nid is not None and str(nid).strip():
-        v = ctx.get(str(nid))
+    for k in _ctx_alias_keys(node.get("id")):
+        v = ctx.get(k)
         if v is not None:
             return v
-    if node.get("indicatorId") is not None:
-        v = ctx.get(str(node["indicatorId"]))
+    for k in _ctx_alias_keys(node.get("indicatorId")):
+        v = ctx.get(k)
         if v is not None:
             return v
     return None
@@ -463,14 +581,29 @@ def _jsonable(x: Any) -> Any:
 
 def _should_collapse_sequential_sibling_frags(parent: Dict[str, Any]) -> bool:
     """
-    顺序链折叠仅适用于「线性算子链」父节点。
-    带 operator_key 的复合算子（如 add）下多个子节点往往是并行依赖，折叠会误删分支（如容器 610111）。
+    顺序链折叠仅适用于「无算子、仅包一层线性子 step」的容器；**不**用于叶子指标内部的算子管道
+    （否则在部分 ``result`` 声明组合下会误缩掉中间步，或与回包期望不一致）。
     """
     parent = normalize_tree_node(parent)
     if _is_leaf_metric(parent):
-        return True
+        return False
     if not str(parent.get("operator_key") or parent.get("operator") or "").strip():
         return True
+    return False
+
+
+def _any_non_last_step_requested_result(parent: Dict[str, Any]) -> bool:
+    """
+    请求里若在「非最后一个」子 step 上声明了 ``result``，则回包须保留整条顺序链，
+    不得折叠为仅最后一步（否则带 ``result`` 的中间算子会从 JSON 中消失）。
+    """
+    parent = normalize_tree_node(parent)
+    steps = parent.get("steps") or []
+    if not isinstance(steps, list) or len(steps) <= 1:
+        return False
+    for ch in steps[:-1]:
+        if isinstance(ch, dict) and "result" in ch:
+            return True
     return False
 
 
@@ -480,10 +613,14 @@ def _collapse_sequential_step_results(
     """
     同一父节点下 ``steps`` 子项若为顺序结构：每项均有 ``result`` 且无嵌套 ``steps``，
     则只保留最后一步（避免算子链每层全量展开）。
+
+    若请求在非末子节点上也带了 ``result``，则不折叠，与「有 result 则回传该节点结果」一致。
     """
     if len(frags) <= 1:
         return frags
     if not _should_collapse_sequential_sibling_frags(parent):
+        return frags
+    if _any_non_last_step_requested_result(parent):
         return frags
     if all("result" in f and not f.get("steps") for f in frags):
         return [frags[-1]]
@@ -542,14 +679,40 @@ def _id_for_output(raw_id: Any, path: str) -> Any:
 
 def build_result_tree(orig_node: Any, ctx: ExecutionContext, path: str = "0") -> Optional[Dict[str, Any]]:
     """
-    生成用于回传的结果树片段：
-    - 仅对输入里带 ``result`` 键的节点、或带非空 ``steps`` 需下钻的节点继续构建。
-    - 子级构建后做顺序链折叠（见 ``_collapse_sequential_step_results``）。
-    - 输出字段：``id``、可选 ``node_id``（与 Java 侧基础指标一致）、有值时 ``result``、可选嵌套 ``steps``。
+    生成用于回传的结果树片段。
+
+    **是否带 ``result``**：请求里声明了 ``result``、或存在可下钻的子 ``steps``、或执行上下文已有该子节点
+    的值时，继续构建（与 ``system_protocol`` 出站裁剪配合：最终是否保留 ``result`` 以请求是否带键为准）。
+
+    **值的来源（不按 ``config`` 推断）**：先 ``_lookup_node_result(orig_node, ctx)``；若无且请求带
+    ``result`` 且已有子片段，再用末子片段 ``result`` 等兜底；容器还可能已在 exec 阶段被写入与末子
+    一致的上下文值。
+
+    **顺序链**：子级构建后经 ``_collapse_sequential_step_results``；若请求在非末子 step 上也带
+    ``result``，则不折叠为仅最后一步。
+
+    输出字段：``id``、可选 ``node_id``、需要时的 ``result``、可选嵌套 ``steps``。
     """
     orig_node = normalize_tree_node(orig_node)
     if not isinstance(orig_node, dict):
         return None
+
+    dr = _reasoning_display_lookup(ctx, orig_node)
+    if dr is not None:
+        raw_id = orig_node.get("node_id")
+        if raw_id is None or str(raw_id).strip() == "":
+            raw_id = orig_node.get("id")
+        if raw_id is None or str(raw_id).strip() == "":
+            raw_id = orig_node.get("indicatorId")
+        node_id_out = _id_for_output(raw_id, path)
+        frag_rd: Dict[str, Any] = {"id": node_id_out}
+        if orig_node.get("node_id") is not None:
+            frag_rd["node_id"] = orig_node["node_id"]
+        if "result" in orig_node:
+            frag_rd["result"] = _final_result_for_output(_jsonable(dr))
+        if orig_node.get("type") is not None:
+            frag_rd["type"] = orig_node["type"]
+        return frag_rd
 
     child_frags: List[Dict[str, Any]] = []
     for idx, ch in enumerate(orig_node.get("steps") or []):
@@ -580,8 +743,7 @@ def build_result_tree(orig_node: Any, ctx: ExecutionContext, path: str = "0") ->
     wants_result = "result" in orig_node
     op_raw = orig_node.get("operator_key") or orig_node.get("operator")
     is_container = not str(op_raw or "").strip()
-    # 容器节点（无 operator_key 但有 steps）常见写法：自身声明 result，但实际结果来自最后一步子节点。
-    # 执行阶段不会为容器节点写入上下文，因此 computed 为空；这里将折叠后的最后子节点 result 作为兜底回传。
+    # 容器常见写法：请求带 result，值可能已在 exec 阶段写入上下文（与末子一致）；若仍取不到则用子片段兜底。
     if computed is None and wants_result and child_frags:
         computed = child_frags[-1].get("result")
     # 容器节点的最终结果若是单元素标量数组，回包时解包为标量

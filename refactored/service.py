@@ -5,6 +5,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 _LOG_FMT = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
 
@@ -76,8 +77,7 @@ _root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _root not in sys.path:
     sys.path.insert(0, _root)
 
-from refactored.api import calculate_indicator  # noqa: E402
-from refactored.core import error_payload  # noqa: E402
+from refactored.api import calculate_evaluation, calculate_system  # noqa: E402
 from refactored.core.exceptions import ErrorCode  # noqa: E402
 from refactored.core.run_lifecycle import normalize_run_id, release_run, try_acquire_run  # noqa: E402
 from refactored.integration.async_jobs import job_submit  # noqa: E402
@@ -92,10 +92,6 @@ _ensure_runtime_logging_visible()
 
 @app.before_request
 def _log_http_inbound():
-    """
-    每条进入本进程的 HTTP 都打一行（WARNING），不依赖 werkzeug 自带访问日志是否在终端显示。
-    若启动后始终看不到本行，说明请求未打到本机该端口（地址/端口/Java 的 CALCULATE_URL 不对）。
-    """
     logging.warning(
         "HTTP 入站 %s %s remote=%s Content-Length=%s",
         request.method,
@@ -111,6 +107,7 @@ def _log_http_inbound():
 
 class _SafeEncoder(json.JSONEncoder):
     """将 NaN / Infinity 转为 None，避免非法 JSON。"""
+
     def default(self, o):
         if isinstance(o, float) and (math.isnan(o) or math.isinf(o)):
             return None
@@ -159,9 +156,7 @@ def _write_ack_if_configured(req_data: dict) -> None:
 
 
 def make_json_response(data, status_code: int = 200) -> Response:
-    """
-    手动构造 UTF-8 JSON 响应，确保中文不乱码。
-    """
+    """手动构造 UTF-8 JSON 响应，确保中文不乱码。"""
     json_str = json.dumps(data, ensure_ascii=False, indent=2, cls=_SafeEncoder)
     return Response(
         json_str,
@@ -170,30 +165,37 @@ def make_json_response(data, status_code: int = 200) -> Response:
     )
 
 
-@app.route("/calculate", methods=["POST"])
-def calculate():
+def _process_steps_request(
+    compute_kind: Literal["system", "evaluation"],
+) -> Response:
     """
-    指标计算接口（单个请求）:
-
-    - 仅接受 execution_mode=dag 与非空 reasoningDataList（每项含 steps 或 types）；不再接受顶层 steps
-    - 请求体 JSON = refactored.api.calculate_indicator 的 request_data
+    处理 ``POST …/system/result`` 或 ``POST …/evaluation/result``。
     """
+    path = request.path
     try:
-        req_data = request.get_json()
-        if not req_data:
+        req_data = request.get_json(silent=True)
+        if req_data is None:
             return make_json_response(
-                error_payload(indicator_name=None, message="请求体不能为空", error_code=1000),
+                {
+                    "success": False,
+                    "taskId": None,
+                    "runId": None,
+                    "systemId": None,
+                    "error_code": 1000,
+                    "message": "请求体不能为空或不是合法 JSON",
+                    "steps": [],
+                },
                 status_code=400,
             )
 
-        # WARNING 保证在多数日志配置下也能看见（排查「Java 发了但 Python 没反应」）
         logging.warning(
-            "POST /calculate 已收到 JSON taskId=%s runId=%s",
+            "POST %s 已收到 JSON taskId=%s runId=%s",
+            path,
             req_data.get("taskId"),
             req_data.get("runId") or req_data.get("run_id"),
         )
         _stderr_line(
-            f"[refactored.service] POST /calculate 已收到 taskId={req_data.get('taskId')} "
+            f"[refactored.service] POST {path} taskId={req_data.get('taskId')} "
             f"runId={req_data.get('runId') or req_data.get('run_id')}"
         )
         logging.info("收到计算请求: %s", json.dumps(req_data, ensure_ascii=False))
@@ -218,11 +220,19 @@ def calculate():
 
         _write_ack_if_configured(req_data)
 
+        calc = calculate_system if compute_kind == "system" else calculate_evaluation
+        cb_url = (
+            app_config.JAVA_RESULT_CALLBACK_URL_SYSTEM
+            if compute_kind == "system"
+            else app_config.JAVA_RESULT_CALLBACK_URL_EVALUATION
+        )
+
         if _sync_calculate_enabled():
             try:
-                result = calculate_indicator(req_data)
+                result = calc(req_data)
                 logging.info(
-                    "同步计算完成 taskId=%s runId=%s success=%s",
+                    "同步计算完成 path=%s taskId=%s runId=%s success=%s",
+                    path,
                     req_data.get("taskId"),
                     run_id,
                     result.get("success"),
@@ -232,24 +242,26 @@ def calculate():
                 if run_id:
                     release_run(run_id)
 
-
         try:
-            internal_job_id = job_submit(req_data)
+            internal_job_id = job_submit(
+                req_data,
+                result_callback_url=cb_url,
+                compute_kind=compute_kind,
+            )
         except Exception:
-            # 已占用 runId 但入队失败时，必须释放，否则该 runId 永久卡死
             if run_id:
                 release_run(run_id)
             raise
         logging.info(
-            "已提交异步计算 internal_job_id=%s taskId=%s runId=%s",
+            "已提交异步计算 internal_job_id=%s path=%s taskId=%s runId=%s → 回调 %s",
             internal_job_id,
+            path,
             req_data.get("taskId"),
             run_id,
+            cb_url,
         )
-        _cb_url = os.environ.get("RESULT_CALLBACK_URL", "").strip() or app_config.RESULT_CALLBACK_URL_DEFAULT
         _stderr_line(
-            f"[refactored.service] 已入队异步任务 job={internal_job_id}；"
-            f"算完后将 POST 结果到 {_cb_url}（须另有进程监听，例如 PythonResultReceiver）"
+            f"[refactored.service] 已入队 job={internal_job_id}；算完后 POST {cb_url}"
         )
         return make_json_response(
             {
@@ -262,11 +274,30 @@ def calculate():
         )
 
     except Exception as e:
-        logging.exception("计算过程发生未捕获异常")
+        logging.exception("计算过程发生未捕获异常 path=%s", path)
+        tid, rid_out, sid = response_meta_triple(request.get_json(silent=True) or {})
         return make_json_response(
-            error_payload(indicator_name=None, message=str(e), error_code=5001),
+            {
+                "success": False,
+                "taskId": tid,
+                "runId": rid_out,
+                "systemId": sid,
+                "error_code": int(ErrorCode.RUNTIME_ERROR),
+                "message": str(e),
+                "steps": [],
+            },
             status_code=500,
         )
+
+
+@app.route(app_config.API_RECEIVE_PATH_SYSTEM_RESULT, methods=["POST"])
+def system_result():
+    return _process_steps_request("system")
+
+
+@app.route(app_config.API_RECEIVE_PATH_EVALUATION_RESULT, methods=["POST"])
+def evaluation_result():
+    return _process_steps_request("evaluation")
 
 
 @app.route("/", methods=["GET"])
@@ -275,7 +306,12 @@ def index():
         {
             "status": "OK",
             "message": "指标计算服务正常",
-            "sync": {"POST": ["/calculate"]},
+            "endpoints": {
+                "POST": [
+                    app_config.API_RECEIVE_PATH_SYSTEM_RESULT,
+                    app_config.API_RECEIVE_PATH_EVALUATION_RESULT,
+                ]
+            },
         }
     )
 
@@ -291,10 +327,8 @@ def _listen_port() -> int:
         return 19080
 
 
-def _log_startup_banner(host: str, port: int, callback_default: str) -> None:
-    """进程一启动就打出一段说明，不依赖先有 HTTP 请求（方便确认日志与配置）。"""
+def _log_startup_banner(host: str, port: int) -> None:
     sync = _sync_calculate_enabled()
-    cb_eff = os.environ.get("RESULT_CALLBACK_URL", "").strip() or callback_default
     try:
         import refactored as _rf
 
@@ -308,12 +342,27 @@ def _log_startup_banner(host: str, port: int, callback_default: str) -> None:
     logging.info("工作目录: %s", os.getcwd())
     logging.info("refactored 包: %s", pkg_root)
     logging.info("监听: http://%s:%s  | 本机: http://127.0.0.1:%s/", host, port, port)
-    logging.info("计算接口: POST http://127.0.0.1:%s/calculate", port)
+    logging.info(
+        "计算接口: POST http://127.0.0.1:%s%s | POST http://127.0.0.1:%s%s",
+        port,
+        app_config.API_RECEIVE_PATH_SYSTEM_RESULT,
+        port,
+        app_config.API_RECEIVE_PATH_EVALUATION_RESULT,
+    )
     if sync:
-        logging.info("模式: CALCULATE_SYNC=1 → 响应体为完整计算结果（一般无需 8091 回调）")
+        logging.info("模式: CALCULATE_SYNC=1 → 响应体为完整计算结果（不 POST 8091）")
     else:
-        logging.info("模式: 异步；算完后 POST 回调: %s", cb_eff)
-    logging.info("请求日志: 任意 HTTP 先打「HTTP 入站 …」；POST /calculate 再打业务日志")
+        logging.info(
+            "模式: 异步；体系 → %s；结果修改 → %s",
+            app_config.JAVA_RESULT_CALLBACK_URL_SYSTEM,
+            app_config.JAVA_RESULT_CALLBACK_URL_EVALUATION,
+        )
+        logging.info(
+            "状态回调: 体系 → %s；结果修改 → %s",
+            app_config.java_status_callback_url_for("system"),
+            app_config.java_status_callback_url_for("evaluation"),
+        )
+    logging.info("请求日志: 任意 HTTP 先打「HTTP 入站 …」")
     logging.info(
         "根 logger: level=%s handlers=%s",
         logging.getLevelName(root.level),
@@ -321,16 +370,16 @@ def _log_startup_banner(host: str, port: int, callback_default: str) -> None:
     )
     logging.info("===========================================")
     logging.warning(
-        "服务就绪: POST http://127.0.0.1:%s/calculate （Flask 将阻塞本终端，Ctrl+C 停止）",
+        "服务就绪: POST http://127.0.0.1:%s%s （Flask 将阻塞本终端，Ctrl+C 停止）",
         port,
+        app_config.API_RECEIVE_PATH_SYSTEM_RESULT,
     )
 
 
 if __name__ == "__main__":
     _host, _port = _listen_host(), _listen_port()
-    _cb = os.environ.get("RESULT_CALLBACK_URL", "").strip() or app_config.RESULT_CALLBACK_URL_DEFAULT
     _ensure_runtime_logging_visible()
-    _log_startup_banner(_host, _port, _cb)
+    _log_startup_banner(_host, _port)
     app.run(
         host=_host,
         port=_port,
@@ -339,4 +388,3 @@ if __name__ == "__main__":
         use_reloader=False,
         processes=1,
     )
-

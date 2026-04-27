@@ -1,6 +1,7 @@
 """Strong typed data model for operator IO."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -119,6 +120,26 @@ class TableValue(DataValue):
             return "object"
         return "object"
 
+    @staticmethod
+    def _numeric_column_types_compatible(actual_dtype: str, cell: Any, column_dtype: str) -> bool:
+        """
+        列类型由首行推断后，允许数值列 int/float 互通（常见于 ES 等来源：整数字面量为 int、带小数或
+        双精度为 float），避免误报 ``expects float`` / ``expects int``。
+        - 列声明为 float：允许后续行为 int。
+        - 列声明为 int：仅当 cell 为整数值的 float（如 200.0）时允许。
+        """
+        if actual_dtype == column_dtype:
+            return True
+        if column_dtype == "float" and actual_dtype == "int":
+            return True
+        if column_dtype == "int" and actual_dtype == "float":
+            return (
+                isinstance(cell, float)
+                and math.isfinite(cell)
+                and cell.is_integer()
+            )
+        return False
+
     @classmethod
     def from_rows(cls, rows: List[Dict[str, Any]]) -> "TableValue":
         if not rows:
@@ -155,7 +176,8 @@ class TableValue(DataValue):
                 v = r.get(n)
                 if v is None:
                     continue
-                if self._dtype(v) != t:
+                actual = self._dtype(v)
+                if actual != t and not self._numeric_column_types_compatible(actual, v, t):
                     raise ValueError(f"TableValue column type mismatch: {n} expects {t}")
 
     def to_dict(self) -> Any:

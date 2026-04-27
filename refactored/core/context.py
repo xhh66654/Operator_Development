@@ -1,7 +1,7 @@
 """上下文生命周期、快照/回滚、复杂表达式解析。"""
 import json
 import threading
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 
 class ExecutionContext:
@@ -19,6 +19,8 @@ class ExecutionContext:
         self._lock = threading.RLock()
         # 快照记录“步骤前已存在 key 集合”，回滚时只删除新 key，避免整仓深拷贝。
         self._snapshot_stack: List[Set[str]] = []
+        # 叶子指标多 reasoning：回包 ``result`` 用 ``{rid: 值}``，与 ctx 内聚合标量分离（仅供 Java 展示/落库）
+        self._reasoning_display_by_node: Dict[str, Dict[str, Any]] = {}
 
     def _estimate_memory_bytes(self) -> int:
         try:
@@ -74,6 +76,19 @@ class ExecutionContext:
         with self._lock:
             self._store.clear()
             self._snapshot_stack.clear()
+            self._reasoning_display_by_node.clear()
+
+    def set_reasoning_display_result(self, node_primary_key: str, by_reasoning: Dict[str, Any]) -> None:
+        """按节点主键登记「给 Java 的 result 字典」；键为 reasoningId 字符串。"""
+        if not node_primary_key:
+            return
+        with self._lock:
+            self._reasoning_display_by_node[node_primary_key] = dict(by_reasoning)
+
+    def get_reasoning_display_result(self, node_primary_key: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            d = self._reasoning_display_by_node.get(node_primary_key)
+            return dict(d) if d is not None else None
 
     def resolve_expression(self, expr: str) -> Any:
         """解析复杂表达式，如 ${step1} + ${step2} * 0.8"""

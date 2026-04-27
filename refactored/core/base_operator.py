@@ -202,6 +202,9 @@ class BaseOperator(ABC):
         if not self.output_spec:
             return
         expected = str(self.output_spec.get("type") or "").strip()
+        if expected == "table" and data_value.type == "list" and data_value.schema.get("length") == 0:
+            # 空行表在 Python 表示为 []，DataValue 无法从空列表推断 table；对 table 输出契约放行。
+            return
         if expected and data_value.type != expected:
             raise OperatorException(
                 f"输出类型不匹配: 期望 {expected}, 实际 {data_value.type}",

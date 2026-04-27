@@ -1,4 +1,4 @@
-"""对外入口：仅接受 Java DAG 推理树（execution_mode=dag + reasoningDataList）。"""
+"""对外入口：体系计算 / 结果修改计算（顶层 ``steps`` 协议，见 SYSTEM_EVALUATION_API_IMPLEMENTATION_SPEC.md）。"""
 import logging
 import os
 import threading
@@ -8,11 +8,7 @@ from typing import Any, Callable, Dict, TypeVar
 # 触发算子自动注册（必须先 import）
 from . import operators  # noqa: F401
 
-from .pipeline.tree_calculation import (
-    execute_tree_calculation,
-    is_tree_protocol_request,
-    validate_dag_request,
-)
+from .pipeline.system_protocol import execute_steps_tree_calculation
 
 T = TypeVar("T")
 
@@ -63,18 +59,25 @@ def _run_with_calc_heartbeat(fn: Callable[..., T], *args: Any, **kwargs: Any) ->
         th.join(timeout=min(2.0, interval + 0.5))
 
 
-def calculate_indicator(request_data: Dict[str, Any]) -> Dict[str, Any]:
-    """与 POST /calculate 一致：仅 ``execution_mode: dag`` + 非空 ``reasoningDataList``。"""
-    err = validate_dag_request(request_data)
-    if err is not None:
-        return err
-    logging.info("计算开始（taskId=%s）", request_data.get("taskId"))
-    return _run_with_calc_heartbeat(execute_tree_calculation, request_data)
+def calculate_system(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """体系计算：``POST …/system/result`` 请求体。"""
+    logging.info("体系计算开始（taskId=%s）", request_data.get("taskId"))
+    return _run_with_calc_heartbeat(execute_steps_tree_calculation, request_data)
+
+
+def calculate_evaluation(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    结果修改计算：``POST …/evaluation/result`` 请求体。
+
+    执行策略细节待定前，与体系计算 **共用** ``execute_steps_tree_calculation``；
+    与体系的差异由 **异步回调 URL**（8091 path）区分。
+    """
+    logging.info("结果修改计算开始（taskId=%s）", request_data.get("taskId"))
+    return _run_with_calc_heartbeat(execute_steps_tree_calculation, request_data)
 
 
 __all__ = [
-    "calculate_indicator",
-    "execute_tree_calculation",
-    "is_tree_protocol_request",
-    "validate_dag_request",
+    "calculate_system",
+    "calculate_evaluation",
+    "execute_steps_tree_calculation",
 ]

@@ -2,11 +2,17 @@
 from typing import Any, Dict, List, Optional
 
 from ...core import BaseOperator, ExecutionContext, OperatorRegistry
+from ...core.data_model import TableValue
 from ...core.exceptions import OperatorException, ErrorCode
 from .._common import normalize_config_input, records_to_latest_columns_dict
 from ..connection.elasticsearch import ES_CLIENT_CONTEXT_KEY, ensure_service_es_client
 
 ES_EXTRACT_CACHE_CONTEXT_KEY = "_es_extract_cache"
+
+
+def _as_table(rows: List[Dict[str, Any]]) -> TableValue:
+    """ES 查询结果按 table 输出；空命中也必须是空表，而不是普通 list。"""
+    return TableValue.from_rows(rows)
 
 
 def _normalize_table_fields(table: Any) -> Optional[List[str]]:
@@ -107,7 +113,7 @@ class ESExtractOperator(BaseOperator):
                 rows = [hit.get("_source", {}) for hit in hits]
                 context.set(ES_EXTRACT_CACHE_CONTEXT_KEY, rows)
                 context.set(context.LATEST_COLUMNS_KEY, records_to_latest_columns_dict(rows))
-                return rows
+                return _as_table(rows)
 
             page_size = int(config.get("page_size", 1000))
             if page_size <= 0:
@@ -164,7 +170,7 @@ class ESExtractOperator(BaseOperator):
 
             context.set(ES_EXTRACT_CACHE_CONTEXT_KEY, hits_sources)
             context.set(context.LATEST_COLUMNS_KEY, records_to_latest_columns_dict(hits_sources))
-            return hits_sources
+            return _as_table(hits_sources)
         except Exception as e:
             raise OperatorException(
                 f"从ES提取失败: {e}",
